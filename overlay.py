@@ -22,7 +22,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 from PySide6.QtCore import (
     Qt,
@@ -39,7 +38,6 @@ from PySide6.QtGui import (
     QBrush,
     QPainterPath,
     QFontMetrics,
-    QScreen,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -107,7 +105,6 @@ class LyricsOverlay(QWidget):
         self._current_line_index: int = -1               # Which line is active
         self._song_artist: str = ""
         self._song_title: str = ""
-        self._connected: bool = False                     # WebSocket client connected?
         self._current_time: float = 0.0                   # Latest timestamp from WS
         self._no_lyrics: bool = False                     # Show "no lyrics" message?
 
@@ -163,10 +160,6 @@ class LyricsOverlay(QWidget):
         """
         self._current_time = current_time
         self.update_requested.emit()
-
-    def set_connected(self, connected: bool) -> None:
-        """Update the WebSocket connection status indicator."""
-        self._connected = connected
 
     def clear(self) -> None:
         """Clear all lyrics from the overlay."""

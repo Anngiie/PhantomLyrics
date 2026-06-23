@@ -24,25 +24,21 @@ The result is a clean "Artist - Song Name" string.
 import logging
 import re
 import threading
-import time
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
 # Lazy import — win32gui is only available on Windows
 _win32gui = None
-_win32process = None
 
 
 def _ensure_win32():
     """Lazy-load the win32 modules."""
-    global _win32gui, _win32process
+    global _win32gui
     if _win32gui is None:
         import win32gui as wg
-        import win32process as wp
 
         _win32gui = wg
-        _win32process = wp
 
 
 # ─── Title Cleaning Patterns ───────────────────────────────────

@@ -87,7 +87,6 @@ class PhantomLyricsApp:
         self._overlay = LyricsOverlay()
         self._ws_server: Optional[LyricsWebSocketServer] = None
         self._browser_monitor: Optional[BrowserMonitor] = None
-        self._pending_song: Optional[tuple[str, str]] = None
         self._fetch_lock = threading.Lock()
         self._current_artist: str = ""
         self._current_title: str = ""
@@ -119,22 +118,17 @@ class PhantomLyricsApp:
         )
         self._browser_monitor.start()
 
-        # 4. Periodic health check (update connection status)
-        self._health_timer = QTimer()
-        self._health_timer.timeout.connect(self._health_check)
-        self._health_timer.start(2000)
-
-        # 5. Handle Ctrl+C gracefully
+        # 4. Handle Ctrl+C gracefully
         signal.signal(signal.SIGINT, self._handle_sigint)
         # On Windows, Qt needs a timer to process Python signals
         self._sig_timer = QTimer()
         self._sig_timer.timeout.connect(lambda: None)  # No-op, just lets signals through
         self._sig_timer.start(200)
 
-        # 6. Enter Qt event loop (blocks until quit)
+        # 5. Enter Qt event loop (blocks until quit)
         exit_code = self._qt_app.exec()
 
-        # 7. Cleanup
+        # 6. Cleanup
         self._shutdown()
         return exit_code
 
@@ -255,19 +249,6 @@ class PhantomLyricsApp:
                 f"Applying {len(fake_tuples)} unsynced lines for '{result.title}' (fallback)"
             )
             self._overlay.set_lyrics(result.artist, result.title, fake_tuples)
-
-    # ─── Health / Status ─────────────────────────────────────
-
-    def _health_check(self) -> None:
-        """Periodically check the health of background services."""
-        if self._ws_server:
-            connected = self._ws_server.client_count > 0
-            self._overlay.set_connected(connected)
-
-            # Log status changes
-            if connected:
-                pass  # All good, nothing to log
-            # (Silent — we don't want to spam the console)
 
 
 # ─── Entry Point ─────────────────────────────────────────────────
