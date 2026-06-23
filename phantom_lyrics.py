@@ -45,6 +45,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from typing import Optional
 
 from PySide6.QtCore import QTimer
@@ -64,6 +65,12 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("phantom_lyrics")
+
+# Lock-on + time-advance tuning
+_STALE_LOCK_TIMEOUT_S = 3.0   # Release the lock if currentTime hasn't advanced
+                              # for this many seconds (tab is stuck/glitchy).
+_TIME_ADVANCE_EPSILON = 0.4   # Minimum currentTime increase (seconds) to count
+                              # as "advancing" — filters out tiny jitter.
 
 
 # ─── Main Application Controller ─────────────────────────────────
@@ -94,6 +101,14 @@ class PhantomLyricsApp:
         self._fetch_lock = threading.Lock()
         self._current_artist: str = ""
         self._current_title: str = ""
+        # Lock-on + time-advance verification:
+        # Only one tab drives lyrics at a time (no flicker), and only a tab
+        # whose currentTime is actually advancing can claim/hold the lock
+        # (no frozen lyrics from glitchy background tabs).
+        self._active_player_id: Optional[int] = None
+        self._last_current_time: float = 0.0
+        self._last_advance_time: float = 0.0   # monotonic time of last currentTime advance
+        self._player_lock = threading.Lock()   # guards the three fields above
 
     # ─── Lifecycle ──────────────────────────────────────────
 
@@ -115,6 +130,7 @@ class PhantomLyricsApp:
             host="localhost",
             port=8765,
             on_timestamp=self._on_timestamp,
+            on_disconnect=self._on_disconnect,
         )
         self._ws_server.start()
 
@@ -159,19 +175,30 @@ class PhantomLyricsApp:
 
     # ─── Event Handlers ─────────────────────────────────────
 
-    def _on_timestamp(self, data: dict) -> None:
+    def _on_timestamp(self, data: dict, client_id: int) -> None:
         """
         Called from the WebSocket server thread when the extension
         sends a new timestamp.
 
-        The extension sends the YouTube page title every second, even when
-        the YouTube tab isn't the active Firefox tab. We use that title to
-        detect the current song — this means lyrics load automatically on
-        app startup without needing to focus the YouTube tab.
+        Uses lock-on + time-advance verification to handle multiple YouTube
+        tabs cleanly:
+
+          - Lock-on: only one tab drives lyrics at a time (no flicker between
+            songs when several tabs report paused:false).
+          - Time-advance: a tab can only claim or hold the lock if its
+            currentTime is actually moving forward — this filters out glitchy
+            background tabs that briefly report paused:false without playing,
+            and prevents frozen lyrics.
+          - Stale eviction: if the locked tab's currentTime stops advancing
+            for _STALE_LOCK_TIMEOUT_S seconds, the lock is released so a
+            genuinely-playing tab can take over.
+          - Disconnect: if the locked tab's connection closes (SPA navigation,
+            tab closed), the lock releases immediately.
 
         Args:
             data: JSON payload from the browser extension:
                   {currentTime, duration, paused, title}
+            client_id: Unique ID of the WebSocket connection (identifies the tab).
         """
         current_time = data.get("currentTime", 0)
         is_paused = data.get("paused", False)
@@ -181,9 +208,51 @@ class PhantomLyricsApp:
         # so the overlay doesn't auto-hide (even while paused).
         self._overlay.mark_activity()
 
-        # Detect the song from the extension's page title. This works even
-        # when the YouTube tab is in the background (the extension runs on
-        # the page regardless and sends document.title every second).
+        now = time.monotonic()
+        is_advancing = False
+
+        with self._player_lock:
+            # Determine whether this tab's playback is genuinely advancing.
+            if not is_paused and (current_time - self._last_current_time) > _TIME_ADVANCE_EPSILON:
+                is_advancing = True
+
+            if self._active_player_id is None:
+                # No active player — only claim the lock if this tab is
+                # genuinely playing (currentTime advancing, not paused).
+                if is_paused or not is_advancing:
+                    return
+                self._active_player_id = client_id
+                self._last_current_time = current_time
+                self._last_advance_time = now
+                logger.info(f"Locked onto player tab {client_id}")
+            elif self._active_player_id != client_id:
+                # A different tab — ignore it entirely while we have a lock.
+                return
+            else:
+                # This is the active player.
+                if is_paused:
+                    # Active player paused — release the lock so another tab
+                    # can take over.
+                    logger.info(f"Active player {client_id} paused — releasing lock")
+                    self._active_player_id = None
+                    self._last_current_time = 0.0
+                    return
+
+                # Evict if currentTime hasn't advanced for too long (stuck/glitchy).
+                if is_advancing:
+                    self._last_current_time = current_time
+                    self._last_advance_time = now
+                elif (now - self._last_advance_time) >= _STALE_LOCK_TIMEOUT_S:
+                    logger.info(
+                        f"Active player {client_id} stale for {_STALE_LOCK_TIMEOUT_S}s — "
+                        f"releasing lock"
+                    )
+                    self._active_player_id = None
+                    self._last_current_time = 0.0
+                    return
+
+        # From here on, this message is from the active player (playing).
+        # Detect the song from the playing tab's page title.
         if ext_title:
             cleaned = clean_youtube_title(ext_title)
             if cleaned:
@@ -191,11 +260,22 @@ class PhantomLyricsApp:
                 if title:
                     self._on_song_change(artist, title)
 
-        if is_paused:
-            return  # Don't advance lyrics while paused
-
         # Forward to overlay (thread-safe via Qt signal)
         self._overlay.set_timestamp(current_time)
+
+    def _on_disconnect(self, client_id: int) -> None:
+        """
+        Called from the WebSocket server thread when a client disconnects.
+
+        If the disconnected client was the active player, release the lock so
+        a new tab can claim it. Handles YouTube SPA navigation (the extension
+        disconnects/reconnects on video change) and tab closure.
+        """
+        with self._player_lock:
+            if self._active_player_id == client_id:
+                logger.info(f"Active player {client_id} disconnected — releasing lock")
+                self._active_player_id = None
+                self._last_current_time = 0.0
 
     def _on_song_change(self, artist: str, title: str) -> None:
         """

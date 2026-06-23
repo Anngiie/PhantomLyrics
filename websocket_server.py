@@ -38,18 +38,23 @@ class LyricsWebSocketServer:
         self,
         host: str = "localhost",
         port: int = 8765,
-        on_timestamp: Optional[Callable[[dict], None]] = None,
+        on_timestamp: Optional[Callable[[dict, int], None]] = None,
+        on_disconnect: Optional[Callable[[int], None]] = None,
     ):
         """
         Args:
             host: Bind address (localhost only for security).
             port: Listening port.
-            on_timestamp: Callback invoked with the parsed JSON payload
+            on_timestamp: Callback invoked with (parsed JSON payload, client_id)
                           whenever a message arrives from the extension.
+                          client_id uniquely identifies the WebSocket connection.
+            on_disconnect: Callback invoked with client_id when a connection
+                           closes, so the app can release any per-client state.
         """
         self.host = host
         self.port = port
         self.on_timestamp = on_timestamp
+        self.on_disconnect = on_disconnect
         self._server: Optional[websockets.WebSocketServer] = None
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -135,9 +140,11 @@ class LyricsWebSocketServer:
     async def _handle_connection(self, ws: WebSocketServerProtocol) -> None:
         """
         Handle a single WebSocket client connection.
-        Receives JSON messages and forwards them via the callback.
+        Receives JSON messages and forwards them via the callback along
+        with a unique client_id (so the app can tell connections apart).
         """
         self._connected_clients.add(ws)
+        client_id = id(ws)
         client_addr = ws.remote_address
         logger.info(f"Client connected: {client_addr} (total: {len(self._connected_clients)})")
 
@@ -150,7 +157,7 @@ class LyricsWebSocketServer:
                     continue
 
                 if self.on_timestamp:
-                    self.on_timestamp(data)
+                    self.on_timestamp(data, client_id)
 
         except websockets.exceptions.ConnectionClosed:
             logger.info(f"Client disconnected: {client_addr}")
@@ -158,3 +165,5 @@ class LyricsWebSocketServer:
             logger.exception(f"Error handling client {client_addr}")
         finally:
             self._connected_clients.discard(ws)
+            if self.on_disconnect:
+                self.on_disconnect(client_id)
