@@ -25,7 +25,9 @@ Phantom Lyrics/
 ├── overlay.py             # PySide6 transparent overlay window
 ├── websocket_server.py    # Local WebSocket server (receives timestamps)
 ├── browser_monitor.py     # Firefox window title polling + song detection
-├── lyrics_fetcher.py      # LRCLib API client + LRC parser
+├── lyrics_fetcher.py      # LRCLib API client + LRC parser + disk cache
+├── tray.py                # System tray icon (toggle, reset, quit)
+├── phantom_lyrics.spec    # PyInstaller build config
 ├── requirements.txt       # Python dependencies
 └── firefox_extension/
     ├── manifest.json      # Firefox add-on manifest
@@ -58,6 +60,28 @@ python phantom_lyrics.py
 
 1. Open a YouTube music video in Firefox.
 2. The overlay should appear in the bottom-left corner of your screen.
+3. Lyrics will highlight in sync with the music — automatically.
+
+### 5. Build a Standalone .exe (optional)
+
+```powershell
+pip install pyinstaller
+pyinstaller phantom_lyrics.spec --noconfirm
+```
+
+The executable is created in `dist/PhantomLyrics/PhantomLyrics.exe`. Run it directly — no Python install needed. The Firefox extension still needs to be loaded separately.
+
+## System Tray
+
+When the app is running, a tray icon appears in the Windows system tray:
+
+- **Left-click** — toggle the overlay visibility (show/hide).
+- **Right-click → Reset position** — move the overlay back to the bottom-left corner.
+- **Right-click → Quit** — exit the app.
+
+## Auto-hide
+
+If no music is playing for ~10 seconds (the extension stops sending timestamps), the overlay fades out automatically. It fades back in the moment music resumes. This keeps your screen clean when you pause or close YouTube.
 3. Lyrics will highlight in sync with the music — automatically.
 
 ## How to Use While Gaming

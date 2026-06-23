@@ -12,3 +12,6 @@ websockets>=12.0
 
 # HTTP requests for LRCLib API
 requests>=2.31.0
+
+# Building a standalone .exe (dev dependency — not needed to run from source)
+pyinstaller>=6.0.0

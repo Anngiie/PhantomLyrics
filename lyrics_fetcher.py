@@ -16,10 +16,12 @@ LRC Format (example):
 Each line is stored as a tuple: (timestamp_seconds, text)
 """
 
+import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -128,7 +130,63 @@ _session.headers.update(
 
 # Simple in-memory cache to avoid re-fetching the same song
 _cache: dict[str, LyricsResult] = {}
-_MAX_CACHE_SIZE = 20
+_MAX_CACHE_SIZE = 100
+
+# Disk cache — persists across runs so previously played songs load instantly
+# and work offline.
+_CACHE_DIR = Path.home() / ".phantom_lyrics"
+_CACHE_FILE = _CACHE_DIR / "lyrics_cache.json"
+
+
+def _serialize_result(result: LyricsResult) -> dict:
+    """Serialize a LyricsResult to a JSON-compatible dict."""
+    return {
+        "title": result.title,
+        "artist": result.artist,
+        "synced_lines": [{"timestamp": l.timestamp, "text": l.text} for l in result.synced_lines],
+        "plain_lyrics": result.plain_lyrics,
+        "source_url": result.source_url,
+        "fetched_at": result.fetched_at,
+    }
+
+
+def _deserialize_result(data: dict) -> LyricsResult:
+    """Reconstruct a LyricsResult from a dict (disk cache load)."""
+    return LyricsResult(
+        title=data.get("title", ""),
+        artist=data.get("artist", ""),
+        synced_lines=[LyricLine(timestamp=l["timestamp"], text=l["text"]) for l in data.get("synced_lines", [])],
+        plain_lyrics=data.get("plain_lyrics", ""),
+        source_url=data.get("source_url", ""),
+        fetched_at=data.get("fetched_at", 0.0),
+    )
+
+
+def _save_cache_to_disk() -> None:
+    """Write the in-memory cache to disk so it survives restarts."""
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {key: _serialize_result(r) for key, r in _cache.items()}
+        _CACHE_FILE.write_text(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        logger.debug("Could not write lyrics cache to disk.", exc_info=True)
+
+
+def _load_cache_from_disk() -> None:
+    """Load the disk cache into memory on startup."""
+    try:
+        if _CACHE_FILE.exists():
+            payload = json.loads(_CACHE_FILE.read_text())
+            for key, data in payload.items():
+                _cache[key] = _deserialize_result(data)
+            logger.info(f"Loaded {len(_cache)} cached lyrics from disk.")
+    except Exception:
+        logger.debug("Could not load lyrics cache from disk.", exc_info=True)
+
+
+def init_cache() -> None:
+    """Load the disk cache into memory. Call once on app startup."""
+    _load_cache_from_disk()
 
 
 def _cache_key(artist: str, title: str) -> str:
@@ -208,12 +266,13 @@ def search_lyrics(artist: str, title: str) -> Optional[LyricsResult]:
             result = direct
             result.source_url = f"https://lrclib.net/api/get/{best['id']}"
 
-    # 5. Cache
+    # 5. Cache (in-memory + disk)
     if len(_cache) >= _MAX_CACHE_SIZE:
         # Evict oldest entry (simple FIFO)
         oldest = next(iter(_cache))
         del _cache[oldest]
     _cache[key] = result
+    _save_cache_to_disk()
 
     if result.has_synced_lyrics:
         logger.info(

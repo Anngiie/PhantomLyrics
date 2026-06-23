@@ -53,7 +53,8 @@ from PySide6.QtWidgets import QApplication
 from overlay import LyricsOverlay
 from websocket_server import LyricsWebSocketServer
 from browser_monitor import BrowserMonitor, clean_youtube_title, split_artist_title
-from lyrics_fetcher import search_lyrics
+from lyrics_fetcher import search_lyrics, init_cache
+from tray import TrayController
 
 # ─── Logging ────────────────────────────────────────────────────
 
@@ -83,10 +84,13 @@ class PhantomLyricsApp:
     def __init__(self) -> None:
         self._qt_app = QApplication(sys.argv)
         self._qt_app.setApplicationName("Phantom Lyrics")
+        # Keep the app running when the overlay is hidden via the tray icon
+        self._qt_app.setQuitOnLastWindowClosed(False)
 
         self._overlay = LyricsOverlay()
         self._ws_server: Optional[LyricsWebSocketServer] = None
         self._browser_monitor: Optional[BrowserMonitor] = None
+        self._tray: Optional[TrayController] = None
         self._fetch_lock = threading.Lock()
         self._current_artist: str = ""
         self._current_title: str = ""
@@ -98,6 +102,9 @@ class PhantomLyricsApp:
         logger.info("=" * 50)
         logger.info("  Phantom Lyrics — Ghost Overlay for YouTube Music")
         logger.info("=" * 50)
+
+        # 0. Load cached lyrics from disk (instant load for known songs)
+        init_cache()
 
         # 1. Show the overlay window (empty, waiting for lyrics)
         self._overlay.show()
@@ -118,7 +125,11 @@ class PhantomLyricsApp:
         )
         self._browser_monitor.start()
 
-        # 4. Handle Ctrl+C gracefully
+        # 4. System tray icon (visibility toggle, reset position, quit)
+        self._tray = TrayController(self._overlay, on_quit=self._qt_app.quit)
+        self._tray.setup()
+
+        # 5. Handle Ctrl+C gracefully
         signal.signal(signal.SIGINT, self._handle_sigint)
         # On Windows, Qt needs a timer to process Python signals
         self._sig_timer = QTimer()
@@ -165,6 +176,10 @@ class PhantomLyricsApp:
         current_time = data.get("currentTime", 0)
         is_paused = data.get("paused", False)
         ext_title = data.get("title", "")
+
+        # Any WebSocket message means the extension is alive — mark activity
+        # so the overlay doesn't auto-hide (even while paused).
+        self._overlay.mark_activity()
 
         # Detect the song from the extension's page title. This works even
         # when the YouTube tab is in the background (the extension runs on

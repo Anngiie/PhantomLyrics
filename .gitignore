@@ -94,3 +94,8 @@ logs/
 # Local config / user-specific overlay settings
 phantom_lyrics.local.*
 *.local.json
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak

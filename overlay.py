@@ -21,6 +21,7 @@ Windows-specific:
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -80,6 +81,12 @@ NO_LYRICS_MESSAGE = "No lyrics found for this song"
 # Update frequency for UI interpolation (ms)
 TICK_INTERVAL_MS = 100
 
+# Auto-hide: fade the overlay out when no timestamp arrives for this long
+AUTO_HIDE_TIMEOUT_S = 10.0    # Seconds of silence before fading out
+AUTO_HIDE_FADE_STEP = 0.05    # Opacity delta per tick (smooth fade)
+AUTO_HIDDEN_OPACITY = 0.0     # Fully hidden when faded out
+AUTO_SHOWN_OPACITY = 1.0      # Fully visible when faded in
+
 # Persist the overlay position across runs
 CONFIG_DIR = Path.home() / ".phantom_lyrics"
 POSITION_FILE = CONFIG_DIR / "overlay_position.json"
@@ -107,6 +114,8 @@ class LyricsOverlay(QWidget):
         self._song_title: str = ""
         self._current_time: float = 0.0                   # Latest timestamp from WS
         self._no_lyrics: bool = False                     # Show "no lyrics" message?
+        self._last_activity_time: float = 0.0             # Last WS message time (monotonic)
+        self._target_opacity: float = AUTO_SHOWN_OPACITY  # Fade target
 
         # ── Drag state ───────────────────────────────────────
         self._drag_offset = None  # QPoint: cursor-to-window-origin offset while dragging
@@ -159,7 +168,37 @@ class LyricsOverlay(QWidget):
             current_time: Current playback position in seconds.
         """
         self._current_time = current_time
+        self._last_activity_time = time.monotonic()
+        self._target_opacity = AUTO_SHOWN_OPACITY
         self.update_requested.emit()
+
+    def mark_activity(self) -> None:
+        """
+        Note that a WebSocket message arrived (music is playing).
+        Thread-safe — can be called from any thread.
+        """
+        self._last_activity_time = time.monotonic()
+        self._target_opacity = AUTO_SHOWN_OPACITY
+
+    def set_visible(self, visible: bool) -> None:
+        """Show or hide the overlay (for the tray icon toggle)."""
+        if visible:
+            self.show()
+        else:
+            self.hide()
+
+    def reset_position(self) -> None:
+        """Move the overlay back to its default bottom-left position."""
+        screen = QApplication.primaryScreen()
+        if screen:
+            screen_geom: QRect = screen.availableGeometry()
+        else:
+            screen_geom = QRect(0, 0, 1920, 1080)
+        x = SIDE_PADDING_PX
+        y = screen_geom.bottom() - self.height() - BOTTOM_PADDING_PX
+        self.move(x, y)
+        self._save_position()
+        logger.info("Overlay position reset to bottom-left.")
 
     def clear(self) -> None:
         """Clear all lyrics from the overlay."""
@@ -393,11 +432,27 @@ class LyricsOverlay(QWidget):
 
     @Slot()
     def _tick(self) -> None:
-        """Called by the timer to refresh the active line and repaint."""
+        """Called by the timer to refresh the active line, auto-hide, and repaint."""
+        # ── Auto-hide: fade out if no activity for AUTO_HIDE_TIMEOUT_S ──
+        if self._last_activity_time > 0:
+            idle = time.monotonic() - self._last_activity_time
+            if idle >= AUTO_HIDE_TIMEOUT_S:
+                self._target_opacity = AUTO_HIDDEN_OPACITY
+
+        # Smoothly approach the target opacity
+        current = self.windowOpacity()
+        if current < self._target_opacity:
+            current = min(self._target_opacity, current + AUTO_HIDE_FADE_STEP)
+            self.setWindowOpacity(current)
+        elif current > self._target_opacity:
+            current = max(self._target_opacity, current - AUTO_HIDE_FADE_STEP)
+            self.setWindowOpacity(current)
+
+        # ── Active line advancement ──
         new_index = self._find_active_line()
         if new_index != self._current_line_index:
             self._current_line_index = new_index
-            self.update()  # Schedule a repaint
+        self.update()  # Repaint every tick (opacity fade needs it)
 
     @Slot()
     def _on_update_requested(self) -> None:
