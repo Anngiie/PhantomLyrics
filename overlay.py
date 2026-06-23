@@ -189,9 +189,6 @@ class LyricsOverlay(QWidget):
         self._current_time = current_time
         self._last_activity_time = time.monotonic()
         self._target_opacity = AUTO_SHOWN_OPACITY
-        # Clear the loading state — we have a live timestamp, so lyrics
-        # should either be showing or about to be set by _on_song_change.
-        self._loading = False
         self.update_requested.emit()
 
     def mark_activity(self) -> None:
