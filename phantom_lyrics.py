@@ -227,6 +227,7 @@ class PhantomLyricsApp:
                     logger.info(f"Active player {client_id} paused — releasing lock")
                     self._active_player_id = None
                     self._last_current_time = 0.0
+                    self._overlay.show_loading()
                     return
 
                 # Evict if currentTime hasn't advanced for too long (stuck/glitchy).
@@ -240,6 +241,7 @@ class PhantomLyricsApp:
                     )
                     self._active_player_id = None
                     self._last_current_time = 0.0
+                    self._overlay.show_loading()
                     return
 
         # From here on, this message is from the active player (playing).
@@ -267,6 +269,7 @@ class PhantomLyricsApp:
                 logger.info(f"Active player {client_id} disconnected — releasing lock")
                 self._active_player_id = None
                 self._last_current_time = 0.0
+                self._overlay.show_loading()
 
     def _on_song_change(self, artist: str, title: str) -> None:
         """
@@ -287,6 +290,9 @@ class PhantomLyricsApp:
 
         self._current_artist = artist
         self._current_title = title
+
+        # Show "Loading..." immediately so the user knows lyrics are being fetched
+        self._overlay.show_loading()
 
         # Fetch lyrics in a background thread to avoid blocking Qt
         fetch_thread = threading.Thread(

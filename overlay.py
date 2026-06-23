@@ -61,8 +61,9 @@ SHADOW_COLOR = QColor(0, 0, 0)      # Black outline for readability on light bg
 # you to grab the letters precisely). Alpha 1/255 is invisible to the eye.
 GRAB_FILL_COLOR = QColor(0, 0, 0, 1)
 
-# Message shown when LRCLib has no lyrics for the current song
+# Messages shown on the overlay
 NO_LYRICS_MESSAGE = "No lyrics found for this song"
+LOADING_MESSAGE = "Loading..."
 
 # Update frequency for UI interpolation (ms)
 TICK_INTERVAL_MS = 100
@@ -113,6 +114,7 @@ class LyricsOverlay(QWidget):
         self._song_title: str = ""
         self._current_time: float = 0.0                   # Latest timestamp from WS
         self._no_lyrics: bool = False                     # Show "no lyrics" message?
+        self._loading: bool = False                        # Show "loading..." message?
         self._last_activity_time: float = 0.0             # Last WS message time (monotonic)
         self._target_opacity: float = AUTO_SHOWN_OPACITY  # Fade target
         self._sync_offset: float = 0.0                    # User-adjusted lyric offset (seconds)
@@ -166,6 +168,7 @@ class LyricsOverlay(QWidget):
         self._current_line_index = -1
         self._current_time = 0.0
         self._no_lyrics = False
+        self._loading = False
         self._sync_offset = sync_offset
         self.update_requested.emit()
 
@@ -259,6 +262,21 @@ class LyricsOverlay(QWidget):
         self._current_line_index = -1
         self._current_time = 0.0
         self._no_lyrics = True
+        self._loading = False
+        self.update_requested.emit()
+
+    def show_loading(self) -> None:
+        """
+        Show a "Loading..." message while waiting for the lock-on to settle
+        or for lyrics to be fetched.
+
+        Thread-safe — can be called from any thread.
+        """
+        self._lyric_lines = []
+        self._current_line_index = -1
+        self._current_time = 0.0
+        self._no_lyrics = False
+        self._loading = True
         self.update_requested.emit()
 
     # ─── Initialization ───────────────────────────────────────
@@ -414,6 +432,16 @@ class LyricsOverlay(QWidget):
             y_offset = lyrics_top
             self._draw_outlined_text(
                 painter, center_x(NO_LYRICS_MESSAGE), y_offset + fm.ascent(), NO_LYRICS_MESSAGE, self._cfg.inactive_line_alpha
+            )
+            painter.end()
+            return
+
+        # ── "Loading..." message (waiting for lock-on or lyrics fetch) ──
+        if self._loading:
+            painter.setFont(font)
+            y_offset = lyrics_top
+            self._draw_outlined_text(
+                painter, center_x(LOADING_MESSAGE), y_offset + fm.ascent(), LOADING_MESSAGE, self._cfg.inactive_line_alpha
             )
             painter.end()
             return
