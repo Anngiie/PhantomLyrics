@@ -342,6 +342,15 @@ class LyricsOverlay(QWidget):
         """Runs on the pynput thread — marshal to the Qt thread via signal."""
         self.gaming_toggle_requested.emit()
 
+    def toggle_gaming_mode(self) -> None:
+        """Public toggle — callable from the tray icon (no hotkey needed)."""
+        self._on_gaming_toggle()
+
+    @property
+    def gaming_mode(self) -> bool:
+        """Whether gaming (click-through) mode is currently active."""
+        return self._gaming_mode
+
     @Slot()
     def _on_gaming_toggle(self) -> None:
         """Toggle between draggable and click-through (gaming) modes."""
@@ -770,6 +779,20 @@ class LyricsOverlay(QWidget):
                 ex_style &= ~win32con.WS_EX_TRANSPARENT
 
             win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
+
+            # Force Windows to re-read the extended style and re-evaluate
+            # hit-testing. Without this, the click-through change may not
+            # take effect (especially noticeable in fullscreen games like LoL).
+            win32gui.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0,
+                win32con.SWP_NOMOVE
+                | win32con.SWP_NOSIZE
+                | win32con.SWP_NOZORDER
+                | win32con.SWP_NOACTIVATE
+                | win32con.SWP_FRAMECHANGED,
+            )
+
+            logger.debug(f"Window styles applied (click_through={click_through})")
 
         except ImportError:
             logger.warning("pywin32 not available — window styles not applied.")

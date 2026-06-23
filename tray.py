@@ -106,6 +106,11 @@ class TrayController(QObject):
         reset_action.triggered.connect(self._overlay.reset_position)
         menu.addAction(reset_action)
 
+        self._gaming_action = QAction("Gaming mode (click-through)", menu)
+        self._gaming_action.setCheckable(True)
+        self._gaming_action.triggered.connect(self._toggle_gaming_mode)
+        menu.addAction(self._gaming_action)
+
         settings_action = QAction("Settings...", menu)
         settings_action.triggered.connect(self._open_settings)
         menu.addAction(settings_action)
@@ -136,6 +141,11 @@ class TrayController(QObject):
             self._overlay.hide()
         else:
             self._overlay.show()
+
+    def _toggle_gaming_mode(self) -> None:
+        """Toggle click-through gaming mode from the tray menu."""
+        self._overlay.toggle_gaming_mode()
+        self._gaming_action.setChecked(self._overlay.gaming_mode)
 
     def _open_settings(self) -> None:
         """Open the settings dialog and apply changes to the overlay."""
