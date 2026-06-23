@@ -223,11 +223,12 @@ class PhantomLyricsApp:
                 # This is the active player.
                 if is_paused:
                     # Active player paused — release the lock so another tab
-                    # can take over.
+                    # can take over, but DON'T clear the lyrics. A pause is
+                    # just a pause; keep showing the current lyrics until a
+                    # new song is detected.
                     logger.info(f"Active player {client_id} paused — releasing lock")
                     self._active_player_id = None
                     self._last_current_time = 0.0
-                    self._overlay.show_loading()
                     return
 
                 # Evict if currentTime hasn't advanced for too long (stuck/glitchy).
