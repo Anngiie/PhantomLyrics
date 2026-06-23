@@ -1,0 +1,14 @@
+# Phantom Lyrics - Dependencies
+# Install with: pip install -r requirements.txt
+
+# GUI Framework for the transparent overlay window
+PySide6>=6.5.0
+
+# Windows API bindings for click-through, window management, and title reading
+pywin32>=306
+
+# WebSocket server (asynchronous)
+websockets>=12.0
+
+# HTTP requests for LRCLib API
+requests>=2.31.0
