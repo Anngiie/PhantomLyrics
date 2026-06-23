@@ -52,7 +52,7 @@ from PySide6.QtWidgets import QApplication
 
 from overlay import LyricsOverlay
 from websocket_server import LyricsWebSocketServer
-from browser_monitor import BrowserMonitor
+from browser_monitor import BrowserMonitor, clean_youtube_title, split_artist_title
 from lyrics_fetcher import search_lyrics
 
 # ─── Logging ────────────────────────────────────────────────────
@@ -159,27 +159,34 @@ class PhantomLyricsApp:
         Called from the WebSocket server thread when the extension
         sends a new timestamp.
 
+        The extension sends the YouTube page title every second, even when
+        the YouTube tab isn't the active Firefox tab. We use that title to
+        detect the current song — this means lyrics load automatically on
+        app startup without needing to focus the YouTube tab.
+
         Args:
             data: JSON payload from the browser extension:
                   {currentTime, duration, paused, title}
         """
         current_time = data.get("currentTime", 0)
         is_paused = data.get("paused", False)
+        ext_title = data.get("title", "")
+
+        # Detect the song from the extension's page title. This works even
+        # when the YouTube tab is in the background (the extension runs on
+        # the page regardless and sends document.title every second).
+        if ext_title:
+            cleaned = clean_youtube_title(ext_title)
+            if cleaned:
+                artist, title = split_artist_title(cleaned)
+                if title:
+                    self._on_song_change(artist, title)
 
         if is_paused:
             return  # Don't advance lyrics while paused
 
         # Forward to overlay (thread-safe via Qt signal)
         self._overlay.set_timestamp(current_time)
-
-        # Also check if the extension's title differs from what
-        # we detected via window polling (optional redundancy)
-        ext_title = data.get("title", "")
-        if ext_title:
-            # Quick check — if the extension title matches a different song,
-            # we could trigger a fetch. For now, the browser monitor handles
-            # this; this is a fallback.
-            pass
 
     def _on_song_change(self, artist: str, title: str) -> None:
         """
@@ -223,11 +230,12 @@ class PhantomLyricsApp:
 
         if result is None:
             logger.info(f"No lyrics found for: {artist} - {title}")
-            # Show a "no lyrics found" message? For now, keep previous lyrics.
+            self._overlay.show_no_lyrics(artist, title)
             return
 
         if not result.has_synced_lyrics and not result.plain_lyrics:
             logger.info(f"Empty lyrics result for: {artist} - {title}")
+            self._overlay.show_no_lyrics(result.artist, result.title)
             return
 
         # If we have synced lyrics, push them to the overlay

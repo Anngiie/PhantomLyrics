@@ -1,24 +1,27 @@
 """
 Phantom Lyrics - Transparent Overlay Window
 =============================================
-A frameless, always-on-top, click-through, transparent PySide6 window
+A frameless, always-on-top, transparent PySide6 window
 that displays song lyrics in a "ghost-like" style.
 
 Features:
   - 100% transparent background (only the text is visible).
-  - Click-through: mouse events pass through to whatever is behind.
+  - Drag-and-drop: click and drag the overlay anywhere on screen, anytime.
+    The position is saved and restored on the next launch.
   - Always-on-top: sits above League of Legends, IDEs, etc.
   - Active lyric line is brighter (~85% opacity), others are dimmer (~40%).
-  - Auto-positions to the bottom-left corner of the screen.
+  - Auto-positions to the bottom-left corner of the screen on first run.
   - Resizes vertically to fit the number of visible lyric lines.
 
 Windows-specific:
-  - Uses win32gui to set WS_EX_TRANSPARENT, WS_EX_LAYERED, and
-    WS_EX_TOOLWINDOW (hides from taskbar/Alt+Tab).
+  - Uses win32gui to set WS_EX_LAYERED and WS_EX_NOACTIVATE
+    (per-pixel transparency + no taskbar/Alt+Tab entry, no focus stealing).
 """
 
+import json
 import logging
 import sys
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -33,6 +36,8 @@ from PySide6.QtGui import (
     QColor,
     QPainter,
     QPen,
+    QBrush,
+    QPainterPath,
     QFontMetrics,
     QScreen,
 )
@@ -47,12 +52,13 @@ logger = logging.getLogger(__name__)
 
 # Overlay dimensions and layout
 OVERLAY_WIDTH = 600            # Fixed width in pixels
-MAX_VISIBLE_LINES = 8         # How many lyric lines to show at once
-LINE_SPACING_PX = 14          # Extra space between lines (added to font height)
+MAX_VISIBLE_LINES = 3         # Lyric rows shown: previous, current, next
+LINE_SPACING_PX = 6           # Extra space between lines (added to font height)
+TITLE_GAP_PX = 12             # Extra space between the song info and the first lyric line
 SIDE_PADDING_PX = 20          # Horizontal padding from the window edge
 BOTTOM_PADDING_PX = 40        # Vertical padding from the screen bottom
 FONT_FAMILY = "Segoe UI"      # Clean, modern font available on Windows
-FONT_SIZE = 16                # Base font size in points
+FONT_SIZE = 14                # Base font size in points
 
 # Opacity values (0-255 for QColor alpha)
 ACTIVE_LINE_ALPHA = 220       # ~86% opacity — stands out clearly
@@ -61,9 +67,24 @@ SONG_INFO_ALPHA = 80          # ~31% opacity — very subtle song info
 
 # Colors
 TEXT_COLOR = QColor(255, 255, 255)  # Pure white, alpha applied per-line
+SHADOW_COLOR = QColor(0, 0, 0)      # Black outline for readability on light bg
+OUTLINE_WIDTH_PX = 3                # Stroke width around each letter (subtitle-style)
+
+# Grab handle: a near-invisible fill (alpha 1) painted across the whole window
+# so Windows delivers mouse events to every pixel (layered windows hit-test by
+# pixel alpha; fully transparent areas would otherwise ignore clicks, forcing
+# you to grab the letters precisely). Alpha 1/255 is invisible to the eye.
+GRAB_FILL_COLOR = QColor(0, 0, 0, 1)
+
+# Message shown when LRCLib has no lyrics for the current song
+NO_LYRICS_MESSAGE = "No lyrics found for this song"
 
 # Update frequency for UI interpolation (ms)
 TICK_INTERVAL_MS = 100
+
+# Persist the overlay position across runs
+CONFIG_DIR = Path.home() / ".phantom_lyrics"
+POSITION_FILE = CONFIG_DIR / "overlay_position.json"
 
 
 # ─── The Overlay Widget ────────────────────────────────────────
@@ -88,10 +109,17 @@ class LyricsOverlay(QWidget):
         self._song_title: str = ""
         self._connected: bool = False                     # WebSocket client connected?
         self._current_time: float = 0.0                   # Latest timestamp from WS
+        self._no_lyrics: bool = False                     # Show "no lyrics" message?
+
+        # ── Drag state ───────────────────────────────────────
+        self._drag_offset = None  # QPoint: cursor-to-window-origin offset while dragging
 
         # ── Setup ────────────────────────────────────────────
         self._init_window()
         self._init_timer()
+
+        # The whole overlay is grabbable — hint with a move cursor
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
 
         logger.info("Lyrics overlay initialized.")
 
@@ -116,9 +144,12 @@ class LyricsOverlay(QWidget):
         """
         self._song_artist = artist
         self._song_title = title
-        self._lyric_lines = lyric_lines
+        # Filter out empty-text lines (instrumental breaks) so they don't
+        # create blank rows — the last sung lyric stays in focus instead.
+        self._lyric_lines = [line for line in lyric_lines if line[1].strip()]
         self._current_line_index = -1
         self._current_time = 0.0
+        self._no_lyrics = False
         self.update_requested.emit()
 
     def set_timestamp(self, current_time: float) -> None:
@@ -143,6 +174,25 @@ class LyricsOverlay(QWidget):
         self._current_line_index = -1
         self._song_artist = ""
         self._song_title = ""
+        self._no_lyrics = False
+        self.update_requested.emit()
+
+    def show_no_lyrics(self, artist: str, title: str) -> None:
+        """
+        Show a "No lyrics found" message for the given song.
+
+        Thread-safe — can be called from any thread.
+
+        Args:
+            artist: Artist name (for the subtle header).
+            title: Song title (for the subtle header).
+        """
+        self._song_artist = artist
+        self._song_title = title
+        self._lyric_lines = []
+        self._current_line_index = -1
+        self._current_time = 0.0
+        self._no_lyrics = True
         self.update_requested.emit()
 
     # ─── Initialization ───────────────────────────────────────
@@ -168,17 +218,20 @@ class LyricsOverlay(QWidget):
         else:
             screen_geom = QRect(0, 0, 1920, 1080)
 
-        # Calculate window height based on max visible lines + song info
+        # Calculate window height: song info header + visible lyric lines
         font = QFont(FONT_FAMILY, FONT_SIZE)
         fm = QFontMetrics(font)
         line_height = fm.height() + LINE_SPACING_PX
-        window_height = (MAX_VISIBLE_LINES * line_height) + SIDE_PADDING_PX  # extra for song info
+        window_height = (MAX_VISIBLE_LINES * line_height) + line_height + SIDE_PADDING_PX
 
         x = SIDE_PADDING_PX
         y = screen_geom.bottom() - window_height - BOTTOM_PADDING_PX
 
         self.setGeometry(x, y, OVERLAY_WIDTH, window_height)
         self.setFixedSize(OVERLAY_WIDTH, window_height)
+
+        # Restore the last saved position (overrides the default bottom-left)
+        self._load_position()
 
     def _init_timer(self) -> None:
         """Set up the refresh timer for smooth UI updates."""
@@ -197,30 +250,44 @@ class LyricsOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
+        # Near-invisible fill across the whole window so every pixel is
+        # grabbable for drag-and-drop (layered windows hit-test by pixel alpha;
+        # fully transparent areas would otherwise ignore mouse clicks).
+        painter.fillRect(self.rect(), GRAB_FILL_COLOR)
+
         font = QFont(FONT_FAMILY, FONT_SIZE)
         fm = QFontMetrics(font)
         line_height = fm.height() + LINE_SPACING_PX
 
+        def center_x(text: str) -> int:
+            """Horizontal x so text is centered within the overlay width."""
+            return (OVERLAY_WIDTH - fm.horizontalAdvance(text)) // 2
+
         # ── Song info line (very subtle) ──────────────────
         if self._song_title:
             painter.setFont(font)
-            color = QColor(TEXT_COLOR)
-            color.setAlpha(SONG_INFO_ALPHA)
-            painter.setPen(QPen(color))
             info_text = f"{self._song_artist} — {self._song_title}" if self._song_artist else self._song_title
-            # Elide if too long
-            elided = fm.elidedText(info_text, Qt.TextElideMode.ElideRight, OVERLAY_WIDTH - 2 * SIDE_PADDING_PX)
-            painter.drawText(SIDE_PADDING_PX, fm.ascent() + 4, elided)
+            baseline = fm.ascent() + 4
+            self._draw_outlined_text(painter, center_x(info_text), baseline, info_text, SONG_INFO_ALPHA)
+
+        # ── "No lyrics found" message ─────────────────────
+        if self._no_lyrics:
+            painter.setFont(font)
+            y_offset = line_height + TITLE_GAP_PX  # gap below song info
+            self._draw_outlined_text(
+                painter, center_x(NO_LYRICS_MESSAGE), y_offset + fm.ascent(), NO_LYRICS_MESSAGE, INACTIVE_LINE_ALPHA
+            )
+            painter.end()
+            return
 
         if not self._lyric_lines:
             painter.end()
             return
 
         # ── Lyric lines ───────────────────────────────────
-        # Calculate which lines to show around the active line
         visible_lines = self._get_visible_window()
 
-        y_offset = SIDE_PADDING_PX + line_height  # Start below song info
+        y_offset = line_height + TITLE_GAP_PX  # gap below song info
 
         for idx, line_text in visible_lines:
             painter.setFont(font)
@@ -237,19 +304,49 @@ class LyricsOverlay(QWidget):
                     fade = max(25, INACTIVE_LINE_ALPHA - (distance - 1) * 15)
                     alpha = fade
 
-            color = QColor(TEXT_COLOR)
-            color.setAlpha(alpha)
-            painter.setPen(QPen(color))
-
-            # Elide text if it overflows
-            elided = fm.elidedText(line_text, Qt.TextElideMode.ElideRight, OVERLAY_WIDTH - 2 * SIDE_PADDING_PX)
-
-            painter.drawText(SIDE_PADDING_PX, y_offset + fm.ascent(), elided)
+            self._draw_outlined_text(painter, center_x(line_text), y_offset + fm.ascent(), line_text, alpha)
             y_offset += line_height
 
         painter.end()
 
     # ─── Internals ────────────────────────────────────────────
+
+    def _draw_outlined_text(
+        self,
+        painter: QPainter,
+        x: int,
+        baseline: int,
+        text: str,
+        alpha: int,
+    ) -> None:
+        """
+        Draw text with a black outline (stroke) and white fill — like TV
+        subtitles. The outline wraps every letter evenly (no offset shadow),
+        so the white text stays readable on any background.
+
+        Implementation: add the text to a QPainterPath, then stroke the path
+        with a thick black pen (the outline) and fill it with white (the text).
+        """
+        path = QPainterPath()
+        path.addText(x, baseline, painter.font(), text)
+
+        # Outline (stroke) — black, thick
+        outline_color = QColor(SHADOW_COLOR)
+        outline_color.setAlpha(alpha)
+        outline_pen = QPen(outline_color)
+        outline_pen.setWidthF(OUTLINE_WIDTH_PX)
+        outline_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        outline_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(outline_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        # Fill (the actual letters) — white
+        fill_color = QColor(TEXT_COLOR)
+        fill_color.setAlpha(alpha)
+        painter.setPen(QPen(fill_color))
+        painter.setBrush(QBrush(fill_color))
+        painter.drawPath(path)
 
     def _get_visible_window(self) -> list[tuple[int, str]]:
         """
@@ -317,26 +414,73 @@ class LyricsOverlay(QWidget):
             self._current_line_index = new_index
         self.update()
 
-    # ─── Click-through (platform-specific) ───────────────────
+    # ─── Drag-and-Drop ───────────────────────────────────────
+
+    def mousePressEvent(self, event) -> None:
+        """Start dragging on left mouse press."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.pos()
+
+    def mouseMoveEvent(self, event) -> None:
+        """Move the overlay with the cursor while the left button is held."""
+        if self._drag_offset is not None and (
+            event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """Stop dragging and persist the new position."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = None
+            self._save_position()
+
+    def _save_position(self) -> None:
+        """Persist the overlay's current position so it survives restarts."""
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            POSITION_FILE.write_text(
+                json.dumps({"x": self.x(), "y": self.y()})
+            )
+        except Exception:
+            logger.debug("Could not save overlay position.", exc_info=True)
+
+    def _load_position(self) -> None:
+        """Restore the saved overlay position, if any."""
+        try:
+            if POSITION_FILE.exists():
+                data = json.loads(POSITION_FILE.read_text())
+                self.move(int(data["x"]), int(data["y"]))
+                logger.info(
+                    "Restored overlay position: (%d, %d)", data["x"], data["y"]
+                )
+        except Exception:
+            logger.debug("Could not load overlay position.", exc_info=True)
+
+    def closeEvent(self, event) -> None:
+        """Save the position on close so the next launch restores it."""
+        self._save_position()
+        super().closeEvent(event)
+
+    # ─── Window styles (platform-specific) ───────────────────
 
     def showEvent(self, event) -> None:
-        """Apply click-through after the window is shown."""
+        """Apply transparency / no-focus styles after the window is shown."""
         super().showEvent(event)
-        self._apply_click_through()
+        self._apply_window_styles()
 
-    def _apply_click_through(self) -> None:
+    def _apply_window_styles(self) -> None:
         """
-        Make the window click-through on Windows using the Win32 API.
+        Set Win32 extended styles for the overlay.
 
-        WS_EX_TRANSPARENT  → mouse events pass through
-        WS_EX_LAYERED      → required for per-pixel alpha / transparency
-        WS_EX_TOOLWINDOW   → hides from Alt+Tab (already set via Qt.Tool)
+        WS_EX_LAYERED    → required for per-pixel alpha (transparent background).
+        WS_EX_NOACTIVATE → window never steals focus (your game keeps focus
+                           even when you click/drag the overlay).
 
-        We also set WS_EX_NOACTIVATE to prevent the window from stealing
-        focus when it becomes visible.
+        Note: WS_EX_TRANSPARENT (click-through) is intentionally NOT set, so
+        the overlay stays grabbable for drag-and-drop at all times.
         """
         if sys.platform != "win32":
-            logger.debug("Click-through is only supported on Windows.")
+            logger.debug("Window styles are only applied on Windows.")
             return
 
         try:
@@ -345,19 +489,12 @@ class LyricsOverlay(QWidget):
 
             hwnd = int(self.winId())
 
-            # Get current extended styles
             ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-
-            # Add click-through and layered styles
-            ex_style |= win32con.WS_EX_TRANSPARENT
             ex_style |= win32con.WS_EX_LAYERED
             ex_style |= win32con.WS_EX_NOACTIVATE
-
             win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
 
-            logger.debug("Click-through applied (WS_EX_TRANSPARENT | WS_EX_LAYERED).")
-
         except ImportError:
-            logger.warning("pywin32 not available — click-through not applied.")
+            logger.warning("pywin32 not available — window styles not applied.")
         except Exception:
-            logger.exception("Failed to apply click-through.")
+            logger.exception("Failed to apply window styles.")
