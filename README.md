@@ -2,6 +2,15 @@
 
 A "ghost-like" desktop overlay that displays synchronized song lyrics anywhere on your screen while you play games or code. Works with YouTube Music in Firefox.
 
+![Phantom Lyrics Demo](assets/app-demo.gif)
+
+## In-Game Demo
+
+The overlay sits on top of your game with click-through gaming mode — you see the lyrics, but mouse clicks pass straight through to the game.
+
+![Gaming with Phantom Lyrics](assets/game-screen1.png)
+![Lyrics overlay during gameplay](assets/game-screen2.png)
+
 ## How It Works
 
 ```
