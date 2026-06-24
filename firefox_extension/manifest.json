@@ -4,9 +4,7 @@
   "version": "1.0",
   "description": "Sends the current YouTube video timestamp to the Phantom Lyrics desktop app via WebSocket.",
 
-  "permissions": [
-    "*://*.youtube.com/*"
-  ],
+  "permissions": ["*://*.youtube.com/*"],
 
   "content_scripts": [
     {
