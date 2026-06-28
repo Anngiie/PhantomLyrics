@@ -91,6 +91,7 @@ class PhantomLyricsApp:
         self._overlay.sync_offset_changed.connect(self._on_sync_offset_changed)
         # Transport buttons on the overlay drive the active browser tab
         self._overlay.transport_requested.connect(self._on_transport)
+        self._overlay.seek_requested.connect(self._on_seek)
         self._ws_server: Optional[LyricsWebSocketServer] = None
         self._tray: Optional[TrayController] = None
         self._fetch_lock = threading.Lock()
@@ -234,6 +235,16 @@ class PhantomLyricsApp:
             return
         logger.info("Transport: %s -> tab %d", command, target)
         self._ws_server.send_command(target, {"command": command})
+
+    def _on_seek(self, timestamp: float) -> None:
+        """Seek the active tab's video to the given timestamp (seconds)."""
+        with self._player_lock:
+            target = self._active_player_id or self._last_player_id
+        if target is None or not self._ws_server:
+            logger.debug("Seek %.1fs ignored (no active tab)", timestamp)
+            return
+        logger.info("Seek: %.1fs -> tab %d", timestamp, target)
+        self._ws_server.send_command(target, {"command": "seek", "time": timestamp})
 
     def _on_song_change(self, artist: str, title: str) -> None:
         """

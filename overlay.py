@@ -109,6 +109,7 @@ class LyricsOverlay(QWidget):
     sync_offset_changed = Signal(str, str, float)      # (artist, title, new_offset)
     gaming_toggle_requested = Signal()                 # global hotkey to Qt thread
     transport_requested = Signal(str)                  # "prev" / "playpause" / "next"
+    seek_requested = Signal(float)                     # seek to timestamp (seconds)
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -129,6 +130,7 @@ class LyricsOverlay(QWidget):
         self._hovered: bool = False                       # Mouse is over the overlay?
         self._sync_btn_rects: dict[str, QRect] = {}       # Button hit-test rects (set in paintEvent)
         self._transport_btn_rects: dict[str, QRect] = {}  # Transport button hit-test rects
+        self._lyric_line_rects: dict[int, tuple[QRect, float]] = {}  # idx → (rect, timestamp)
         self._pressed_btn: str | None = None              # Which button is flashing as pressed
         self._pressed_until: float = 0.0                  # Monotonic time the press flash ends
         self._feedback_text: str = ""                     # Temporary toast text (e.g. "Sync: +1.0s")
@@ -390,11 +392,13 @@ class LyricsOverlay(QWidget):
             return
 
         if not self._lyric_lines:
+            self._lyric_line_rects.clear()
             painter.end()
             return
 
         # ── Lyric lines ───────────────────────────────────
         visible_lines = self._get_visible_window()
+        self._lyric_line_rects.clear()
 
         y_offset = lyrics_top
 
@@ -414,6 +418,10 @@ class LyricsOverlay(QWidget):
                     alpha = fade
 
             self._draw_outlined_text(painter, center_x(line_text), y_offset + fm.ascent(), line_text, alpha)
+
+            # Store this line's rect + timestamp for click-to-seek
+            self._lyric_line_rects[idx] = (QRect(0, y_offset, self._cfg.overlay_width, line_height), self._lyric_lines[idx][0])
+
             y_offset += line_height
 
         # ── Transport + sync buttons (when hovering, or during feedback) ───
@@ -777,6 +785,20 @@ class LyricsOverlay(QWidget):
                 if rect.contains(pos):
                     self._handle_sync_button(btn_id)
                     return
+            # Lyric line (click to seek)?
+            logger.debug(
+                "Lyric click at (%d,%d) — %d rects available",
+                pos.x(), pos.y(), len(self._lyric_line_rects),
+            )
+            for idx, (rect, timestamp) in self._lyric_line_rects.items():
+                if rect.contains(pos):
+                    self.seek_requested.emit(timestamp)
+                    logger.info("🎯 Seek to %.1fs (line %d)", timestamp, idx)
+                    self._feedback_text = f"Seek: {timestamp:.1f}s"
+                    self._feedback_until = time.monotonic() + 1.5
+                    self.update()
+                    return
+            logger.debug("Click did not hit any lyric rect — starting drag")
             # Not on a button, start dragging
             self._drag_offset = event.globalPosition().toPoint() - self.pos()
 

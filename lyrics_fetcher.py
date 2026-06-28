@@ -195,7 +195,10 @@ def _load_cache_from_disk() -> None:
     """Load the disk cache into memory on startup."""
     try:
         if _CACHE_FILE.exists():
-            payload = json.loads(_CACHE_FILE.read_text())
+            raw = _CACHE_FILE.read_text().strip()
+            if not raw:
+                return
+            payload = json.loads(raw)
             for key, data in payload.items():
                 _cache[key] = _deserialize_result(data)
             # Enforce the cap in case the on-disk file holds more than

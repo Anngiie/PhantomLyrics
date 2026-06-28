@@ -25,7 +25,7 @@ class Config:
 
     # ── Overlay layout ──
     overlay_width: int = 600
-    max_visible_lines: int = 3
+    max_visible_lines: int = 7
     line_spacing_px: int = 6
     title_gap_px: int = 12
     side_padding_px: int = 20

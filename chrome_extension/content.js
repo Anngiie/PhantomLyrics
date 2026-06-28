@@ -115,6 +115,9 @@
             case "prev":
                 clickButton(".ytp-prev-button");
                 break;
+            case "seek":
+                if (video && typeof msg.time === "number") { video.currentTime = msg.time; }
+                break;
         }
         sendState(); // reflect the change without waiting for the next tick
     }
