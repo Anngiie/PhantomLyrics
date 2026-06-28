@@ -4,8 +4,9 @@
 # GUI Framework for the transparent overlay window
 PySide6>=6.5.0
 
-# Windows API bindings for click-through, window management, and title reading
-pywin32>=306
+# Windows API bindings for click-through and window management (Windows only;
+# on Linux/macOS the overlay uses Qt's cross-platform flags instead)
+pywin32>=306; sys_platform == "win32"
 
 # WebSocket server (asynchronous)
 websockets>=12.0

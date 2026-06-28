@@ -55,6 +55,9 @@ _CLEANUP_PATTERNS: list[tuple[re.Pattern, str]] = [
 # Separator between artist and title: hyphen, en-dash (U+2013), or em-dash (U+2014)
 _ARTIST_TITLE_SEPARATOR_RE = re.compile(r"\s*[-\u2013\u2014]\s*")
 
+# YouTube auto-generated artist channels are named "Artist - Topic".
+_TOPIC_SUFFIX_RE = re.compile(r"\s*[-\u2013\u2014]\s*Topic\s*$", re.IGNORECASE)
+
 
 def clean_youtube_title(raw_title: str) -> str:
     """
@@ -98,5 +101,26 @@ def split_artist_title(cleaned_title: str) -> tuple[str, str]:
         title = cleaned_title[match.end() :].strip()
         return artist, title
     else:
-        # Can't split reliably — return the whole thing as the title
+        # Can't split reliably, return the whole thing as the title
         return "", cleaned_title.strip()
+
+
+def clean_artist(artist: str) -> str:
+    """Tidy an artist string from MediaSession (drops YouTube's '- Topic')."""
+    return _TOPIC_SUFFIX_RE.sub("", artist.strip()).strip()
+
+
+def resolve_song(artist: str, title: str, has_metadata: bool) -> tuple[str, str]:
+    """
+    Work out (artist, title) for the playing track.
+
+    With MediaSession metadata and a real artist, use them directly and only
+    strip video tags from the title (no dash-splitting guesswork). Otherwise
+    treat `title` as a combined page title and parse it the old way.
+    """
+    if has_metadata and artist.strip():
+        return clean_artist(artist), clean_youtube_title(title)
+    cleaned = clean_youtube_title(title)
+    if not cleaned:
+        return "", ""
+    return split_artist_title(cleaned)

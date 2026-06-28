@@ -11,9 +11,9 @@ Or without pytest:
     python test_phantom_lyrics.py
 """
 
-from title_utils import clean_youtube_title, split_artist_title
-from lyrics_fetcher import parse_lrc, LyricLine, _title_similarity
-from phantom_lyrics import playback_is_advancing
+from title_utils import clean_youtube_title, split_artist_title, resolve_song, clean_artist
+from lyrics_fetcher import parse_lrc, _title_similarity
+from phantom_lyrics import decide_lock
 
 
 # ─── clean_youtube_title ──────────────────────────────────────
@@ -113,25 +113,44 @@ def test_similarity_no_match():
     assert _title_similarity("Completely Different", "In the End") == 0.0
 
 
-# ─── playback_is_advancing ────────────────────────────────────
+# ─── resolve_song ─────────────────────────────────────────────
 
-def test_advancing_forward_playback():
-    assert playback_is_advancing(10.0, 11.0, is_paused=False, epsilon=0.4) is True
+def test_resolve_uses_metadata_when_present():
+    assert resolve_song("Linkin Park", "In the End", True) == ("Linkin Park", "In the End")
 
-def test_not_advancing_when_paused():
-    assert playback_is_advancing(10.0, 11.0, is_paused=True, epsilon=0.4) is False
+def test_resolve_strips_topic_suffix():
+    assert resolve_song("Adele - Topic", "Hello", True) == ("Adele", "Hello")
 
-def test_not_advancing_when_frozen():
-    assert playback_is_advancing(10.0, 10.1, is_paused=False, epsilon=0.4) is False
+def test_resolve_strips_tags_from_metadata_title():
+    assert resolve_song("Adele", "Hello (Official Video)", True) == ("Adele", "Hello")
 
-def test_advancing_on_loop_restart():
-    assert playback_is_advancing(200.0, 0.0, is_paused=False, epsilon=0.4) is True
+def test_resolve_falls_back_to_title_parsing():
+    # No usable metadata: parse a combined "Artist - Title - YouTube" string.
+    assert resolve_song("", "Adele - Hello - YouTube", False) == ("Adele", "Hello")
 
-def test_advancing_on_seek_back():
-    assert playback_is_advancing(120.0, 30.0, is_paused=False, epsilon=0.4) is True
+def test_resolve_metadata_without_artist_falls_back():
+    assert resolve_song("", "Adele - Hello", True) == ("Adele", "Hello")
 
-def test_not_advancing_on_backward_jitter():
-    assert playback_is_advancing(50.0, 49.9, is_paused=False, epsilon=0.4) is False
+def test_clean_artist_plain():
+    assert clean_artist("Linkin Park") == "Linkin Park"
+
+
+# ─── decide_lock ──────────────────────────────────────────────
+
+def test_lock_claim_when_idle_and_playing():
+    assert decide_lock(None, 1, True) == ("claim", 1)
+
+def test_lock_ignore_when_idle_and_paused():
+    assert decide_lock(None, 1, False) == ("ignore", None)
+
+def test_lock_hold_while_active_plays():
+    assert decide_lock(1, 1, True) == ("hold", 1)
+
+def test_lock_release_when_active_pauses():
+    assert decide_lock(1, 1, False) == ("release", None)
+
+def test_lock_ignores_other_tab():
+    assert decide_lock(1, 2, True) == ("ignore", 1)
 
 
 # ─── Run without pytest ───────────────────────────────────────
@@ -148,9 +167,13 @@ if __name__ == "__main__":
         test_parse_variable_fraction_digits,
         test_similarity_exact_match, test_similarity_partial_match,
         test_similarity_no_match,
-        test_advancing_forward_playback, test_not_advancing_when_paused,
-        test_not_advancing_when_frozen, test_advancing_on_loop_restart,
-        test_advancing_on_seek_back, test_not_advancing_on_backward_jitter,
+        test_resolve_uses_metadata_when_present, test_resolve_strips_topic_suffix,
+        test_resolve_strips_tags_from_metadata_title,
+        test_resolve_falls_back_to_title_parsing,
+        test_resolve_metadata_without_artist_falls_back, test_clean_artist_plain,
+        test_lock_claim_when_idle_and_playing, test_lock_ignore_when_idle_and_paused,
+        test_lock_hold_while_active_plays, test_lock_release_when_active_pauses,
+        test_lock_ignores_other_tab,
     ]
     passed = 0
     failed = 0

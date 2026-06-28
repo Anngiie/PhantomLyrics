@@ -1,51 +1,17 @@
 """
 Phantom Lyrics - Main Application
-===================================
-Entry point for the Phantom Lyrics desktop overlay application.
 
-Architecture
-------------
-  ┌──────────────────────────────────────────────────────┐
-  │                    phantom_lyrics.py                  │
-  │  (Main Thread — PySide6 Event Loop)                  │
-  │                                                      │
-  │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-  │  │  Overlay     │  │  WebSocket   │  │  Browser   │ │
-  │  │  (PySide6)   │  │  Server      │  │  Monitor   │ │
-  │  │              │  │  (Thread)    │  │  (Thread)  │ │
-  │  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
-  │         │                 │                │         │
-  │         │    timestamp    │   song change  │         │
-  │         │◄────────────────┤◄───────────────┘         │
-  │         │                 │                          │
-  │         │         ┌──────┴────────┐                 │
-  │         │         │ Lyrics Fetcher │                 │
-  │         │         │ (LRCLib API)   │                 │
-  │         │         └───────────────┘                 │
-  └──────────────────────────────────────────────────────┘
+Wires the pieces together: the transparent overlay, the local WebSocket server
+that talks to the browser extension, and the background lyrics fetch. The
+extension reports the playing track and accepts playback commands back.
 
-  ┌──────────────────┐
-  │  Firefox Add-on  │
-  │  (content.js)    │── WebSocket ──► ws://localhost:8765
-  └──────────────────┘
-
-Usage
------
-    python phantom_lyrics.py
-
-    Then load the Firefox extension manually:
-    1. Open Firefox → about:debugging#/runtime/this-firefox
-    2. "Load Temporary Add-on"
-    3. Select firefox_extension/manifest.json
-    4. Navigate to any YouTube music video
-    5. The overlay will show lyrics automatically
+Run with:  python phantom_lyrics.py
 """
 
 import logging
 import signal
 import sys
 import threading
-import time
 from typing import Optional
 
 from PySide6.QtCore import QTimer
@@ -53,7 +19,7 @@ from PySide6.QtWidgets import QApplication
 
 from overlay import LyricsOverlay
 from websocket_server import LyricsWebSocketServer
-from title_utils import clean_youtube_title, split_artist_title
+from title_utils import resolve_song
 from lyrics_fetcher import search_lyrics, init_cache, save_sync_offset
 from tray import TrayController
 from config import load_config, Config
@@ -77,33 +43,25 @@ logger = logging.getLogger("phantom_lyrics")
 # ─── Playback Helpers ────────────────────────────────────────────
 
 
-def playback_is_advancing(
-    prev_time: float,
-    current_time: float,
-    is_paused: bool,
-    epsilon: float,
-) -> bool:
+def decide_lock(active_id, client_id, is_playing):
     """
-    Whether a tab's playback position indicates it is actively playing.
+    Decide what to do with a status message under the single-active-tab lock.
 
-    The position is "advancing" when it moves by more than ``epsilon`` in
-    EITHER direction:
-      - forward  → normal playback,
-      - backward → the song looped (currentTime snapped back to ~0) or the
-        user seeked backward.
+    The extension reports the real play/pause state, so we trust it directly
+    instead of inferring playback from how fast currentTime moves. That keeps
+    looping a song from ever looking like a stall.
 
-    Only a paused tab, or a frozen/glitched position (|delta| <= epsilon),
-    counts as not advancing.
-
-    Counting a backward jump as advancing is what keeps the active-player lock
-    held when a song is set to loop. Otherwise currentTime resetting from the
-    end back to 0 looks like a stall: the lock goes stale, the lyrics are
-    cleared, and the same song never re-fetches — so it shows "Loading..." /
-    "No lyrics found" on every loop after the first.
+    Returns (action, new_active_id) where action is:
+      "claim"   no tab held the lock and this one is playing, so it takes it
+      "hold"    this is the active tab and still playing, keep driving lyrics
+      "release" this is the active tab but now paused, drop the lock (keep lyrics)
+      "ignore"  another tab holds the lock, or nothing is playing yet
     """
-    if is_paused:
-        return False
-    return abs(current_time - prev_time) > epsilon
+    if active_id is None:
+        return ("claim", client_id) if is_playing else ("ignore", None)
+    if active_id == client_id:
+        return ("hold", client_id) if is_playing else ("release", None)
+    return ("ignore", active_id)
 
 
 # ─── Main Application Controller ─────────────────────────────────
@@ -131,23 +89,21 @@ class PhantomLyricsApp:
         self._overlay = LyricsOverlay(self._config)
         # Persist sync offset changes to the lyrics cache
         self._overlay.sync_offset_changed.connect(self._on_sync_offset_changed)
+        # Transport buttons on the overlay drive the active browser tab
+        self._overlay.transport_requested.connect(self._on_transport)
         self._ws_server: Optional[LyricsWebSocketServer] = None
         self._tray: Optional[TrayController] = None
         self._fetch_lock = threading.Lock()
         self._current_artist: str = ""
         self._current_title: str = ""
         # A newly-detected song must repeat once before we switch to it, so a
-        # one-poll title blip (an ad, or YouTube briefly rewriting
-        # document.title) can't tear the current lyrics down mid-song.
+        # one-poll title blip (an ad, or a brief metadata change) can't tear the
+        # current lyrics down mid-song.
         self._pending_song: Optional[tuple[str, str]] = None
-        # Lock-on + time-advance verification:
-        # Only one tab drives lyrics at a time (no flicker), and only a tab
-        # whose currentTime is actually advancing can claim/hold the lock
-        # (no frozen lyrics from glitchy background tabs).
+        # Only one tab drives lyrics at a time (no flicker between tabs). The
+        # tab's reported play/pause state decides who holds the lock.
         self._active_player_id: Optional[int] = None
-        self._last_current_time: float = 0.0
-        self._last_advance_time: float = 0.0   # monotonic time of last currentTime advance
-        self._player_lock = threading.Lock()   # guards the three fields above
+        self._player_lock = threading.Lock()   # guards _active_player_id
 
     # ─── Lifecycle ──────────────────────────────────────────
 
@@ -160,9 +116,9 @@ class PhantomLyricsApp:
         # 0. Load cached lyrics from disk (instant load for known songs)
         init_cache()
 
-        # 1. Show the overlay window (empty, waiting for lyrics)
-        self._overlay.show()
-        logger.info("Overlay window shown.")
+        # 1. The overlay stays hidden until a song is actually playing, so an
+        #    idle desktop shows no overlay (and no stray cursor or click area).
+        logger.info("Overlay ready (hidden until a song plays).")
 
         # 2. Start the WebSocket server for timestamp data
         self._ws_server = LyricsWebSocketServer(
@@ -207,127 +163,65 @@ class PhantomLyricsApp:
 
     def _on_timestamp(self, data: dict, client_id: int) -> None:
         """
-        Called from the WebSocket server thread when the extension
-        sends a new timestamp.
+        Handle a status message from a browser tab (runs on the WS thread).
 
-        Uses lock-on + time-advance verification to handle multiple YouTube
-        tabs cleanly:
+        Only one tab drives the lyrics at a time. The tab's reported play/pause
+        state decides the lock (see decide_lock): the first playing tab claims
+        it, a different tab is ignored, and the active tab releases the lock
+        when it pauses (lyrics stay up) or disconnects.
 
-          - Lock-on: only one tab drives lyrics at a time (no flicker between
-            songs when several tabs report paused:false).
-          - Time-advance: a tab can only claim or hold the lock if its
-            currentTime is actually moving forward — this filters out glitchy
-            background tabs that briefly report paused:false without playing,
-            and prevents frozen lyrics.
-          - Stale eviction: if the locked tab's currentTime stops advancing
-            for _STALE_LOCK_TIMEOUT_S seconds, the lock is released so a
-            genuinely-playing tab can take over.
-          - Disconnect: if the locked tab's connection closes (SPA navigation,
-            tab closed), the lock releases immediately.
-
-        Args:
-            data: JSON payload from the browser extension:
-                  {currentTime, duration, paused, title}
-            client_id: Unique ID of the WebSocket connection (identifies the tab).
+        Payload: {currentTime, duration, paused, title, artist, album,
+                  artwork, hasMetadata}
         """
-        current_time = data.get("currentTime", 0)
-        is_paused = data.get("paused", False)
-        ext_title = data.get("title", "")
+        current_time = data.get("currentTime", 0.0)
+        is_playing = not data.get("paused", False)
 
-        logger.debug(
-            "WS msg from client %d: ct=%.2f paused=%s title=%s",
-            client_id, current_time, is_paused, ext_title[:80] if ext_title else "(none)",
-        )
-
-        # Any WebSocket message means the extension is alive — mark activity
-        # so the overlay doesn't auto-hide (even while paused).
+        # Any message means the extension is alive, so keep the overlay awake.
         self._overlay.mark_activity()
 
-        now = time.monotonic()
-
-        stale_timeout = self._config.stale_lock_timeout_s
-        advance_epsilon = self._config.time_advance_epsilon
-
         with self._player_lock:
-            # Determine whether this tab's playback is genuinely advancing.
-            # A backward jump (song set to loop, or a manual seek-back) counts
-            # as advancing too — otherwise the loop's currentTime reset looks
-            # like a stall, the lock goes stale, and the lyrics get dropped.
-            is_advancing = playback_is_advancing(
-                self._last_current_time, current_time, is_paused, advance_epsilon
+            action, self._active_player_id = decide_lock(
+                self._active_player_id, client_id, is_playing
             )
 
-            if self._active_player_id is None:
-                # No active player — only claim the lock if this tab is
-                # genuinely playing (currentTime advancing, not paused).
-                if is_paused or not is_advancing:
-                    logger.debug(
-                        "Tab %d not claiming lock: paused=%s advancing=%s",
-                        client_id, is_paused, is_advancing,
-                    )
-                    return
-                self._active_player_id = client_id
-                self._last_current_time = current_time
-                self._last_advance_time = now
-                logger.info("🔒 Locked onto player tab %d (ct=%.2f)", client_id, current_time)
-            elif self._active_player_id != client_id:
-                # A different tab — ignore it entirely while we have a lock.
-                logger.debug(
-                    "Ignoring tab %d — lock held by tab %d", client_id, self._active_player_id
-                )
-                return
-            else:
-                # This is the active player.
-                if is_paused:
-                    # Active player paused — release the lock so another tab
-                    # can take over, but DON'T clear the lyrics. A pause is
-                    # just a pause; keep showing the current lyrics until a
-                    # new song is detected.
-                    logger.info(f"Active player {client_id} paused — releasing lock")
-                    self._active_player_id = None
-                    self._last_current_time = 0.0
-                    return
+        if action == "claim":
+            logger.info("Locked onto tab %d", client_id)
+        elif action in ("ignore", "release"):
+            # ignore: not the active tab, or nothing playing yet.
+            # release: the active tab paused, so drop the lock but keep lyrics.
+            return
 
-                # Evict if currentTime hasn't advanced for too long (stuck/glitchy).
-                if is_advancing:
-                    self._last_current_time = current_time
-                    self._last_advance_time = now
-                elif (now - self._last_advance_time) >= stale_timeout:
-                    logger.info(
-                        f"Active player {client_id} stale for {stale_timeout}s — "
-                        f"releasing lock"
-                    )
-                    self._active_player_id = None
-                    self._last_current_time = 0.0
-                    self._overlay.show_loading()
-                    return
+        # Active, playing tab: detect the song and push the timestamp.
+        artist, title = resolve_song(
+            data.get("artist", "") or "",
+            data.get("title", "") or "",
+            bool(data.get("hasMetadata", False)),
+        )
+        if title:
+            self._on_song_change(artist, title)
 
-        # From here on, this message is from the active player (playing).
-        # Detect the song from the playing tab's page title.
-        if ext_title:
-            cleaned = clean_youtube_title(ext_title)
-            if cleaned:
-                artist, title = split_artist_title(cleaned)
-                if title:
-                    self._on_song_change(artist, title)
-
-        # Forward to overlay (thread-safe via Qt signal)
         self._overlay.set_timestamp(current_time)
 
     def _on_disconnect(self, client_id: int) -> None:
         """
-        Called from the WebSocket server thread when a client disconnects.
-
-        If the disconnected client was the active player, release the lock so
-        a new tab can claim it. Handles YouTube SPA navigation (the extension
-        disconnects/reconnects on video change) and tab closure.
+        Release the lock if the active tab's connection closed (SPA navigation
+        or tab closed), so another tab can take over.
         """
         with self._player_lock:
             if self._active_player_id == client_id:
-                logger.info(f"Active player {client_id} disconnected — releasing lock")
+                logger.info("Active tab %d disconnected, releasing lock", client_id)
                 self._active_player_id = None
-                self._last_current_time = 0.0
                 self._overlay.show_loading()
+
+    def _on_transport(self, command: str) -> None:
+        """Forward a transport button press to the active tab's browser."""
+        with self._player_lock:
+            target = self._active_player_id
+        if target is None or not self._ws_server:
+            logger.debug("Transport '%s' ignored (no active tab)", command)
+            return
+        logger.info("Transport: %s -> tab %d", command, target)
+        self._ws_server.send_command(target, {"command": command})
 
     def _on_song_change(self, artist: str, title: str) -> None:
         """
