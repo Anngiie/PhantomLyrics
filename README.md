@@ -256,6 +256,10 @@ The overlay is **free-draggable** — no lock, no hotkey, no toggle.
 - **pynput** — Global hotkey for Lock Overlay toggle
 - **Firefox + Chromium WebExtension** — YouTube timestamp extraction (supports all major browsers)
 
+## Upcoming Features
+
+- **Spotify Premium support** — native Spotify integration via the Spotify Web API, providing the same automatic, synced lyrics experience for Spotify Premium subscribers. No browser extension needed.
+
 ## Credits
 
 - Lyrics data from [LRCLib](https://lrclib.net) — a free, open-source lyrics database.
