@@ -103,8 +103,8 @@ class PhantomLyricsApp:
         # Only one tab drives lyrics at a time (no flicker between tabs). The
         # tab's reported play/pause state decides who holds the lock.
         self._active_player_id: Optional[int] = None
+        self._last_player_id: Optional[int] = None  # Persists after lock release
         self._player_lock = threading.Lock()   # guards _active_player_id
-
     # ─── Lifecycle ──────────────────────────────────────────
 
     def run(self) -> int:
@@ -183,12 +183,24 @@ class PhantomLyricsApp:
             action, self._active_player_id = decide_lock(
                 self._active_player_id, client_id, is_playing
             )
+            if action in ("claim", "hold"):
+                self._last_player_id = client_id
+
+        # Always push the playback state so the transport button icon
+        # toggles between play ▸ and pause ▍▍ immediately — even when
+        # the lock releases (pause) or a tab is ignored.
+        self._overlay.set_playback_state(is_playing)
 
         if action == "claim":
             logger.info("Locked onto tab %d", client_id)
-        elif action in ("ignore", "release"):
-            # ignore: not the active tab, or nothing playing yet.
-            # release: the active tab paused, so drop the lock but keep lyrics.
+        elif action == "hold":
+            # Same active tab, still playing — keep driving lyrics.
+            pass
+        elif action == "release":
+            # Active tab paused — release lock but keep lyrics visible.
+            return
+        elif action == "ignore":
+            # Another tab holds the lock, or nothing is playing yet.
             return
 
         # Active, playing tab: detect the song and push the timestamp.
@@ -216,7 +228,7 @@ class PhantomLyricsApp:
     def _on_transport(self, command: str) -> None:
         """Forward a transport button press to the active tab's browser."""
         with self._player_lock:
-            target = self._active_player_id
+            target = self._active_player_id or self._last_player_id
         if target is None or not self._ws_server:
             logger.debug("Transport '%s' ignored (no active tab)", command)
             return

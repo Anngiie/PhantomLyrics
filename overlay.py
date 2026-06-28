@@ -104,6 +104,7 @@ class LyricsOverlay(QWidget):
     loading_requested = Signal()
     no_lyrics_requested = Signal(str, str)             # artist, title
     timestamp_received = Signal(float)                 # current playback time (s)
+    playback_state_received = Signal(bool)             # True when video is playing
     activity_pinged = Signal()
     sync_offset_changed = Signal(str, str, float)      # (artist, title, new_offset)
     gaming_toggle_requested = Signal()                 # global hotkey to Qt thread
@@ -123,6 +124,7 @@ class LyricsOverlay(QWidget):
         self._loading: bool = False                        # Show "loading..." message?
         self._last_activity_time: float = 0.0             # Last WS message time (monotonic)
         self._target_opacity: float = AUTO_SHOWN_OPACITY  # Fade target
+        self._paused: bool = False                         # Video playback state (for button icon)
         self._sync_offset: float = 0.0                    # User-adjusted lyric offset (seconds)
         self._hovered: bool = False                       # Mouse is over the overlay?
         self._sync_btn_rects: dict[str, QRect] = {}       # Button hit-test rects (set in paintEvent)
@@ -168,6 +170,10 @@ class LyricsOverlay(QWidget):
     def set_timestamp(self, current_time: float) -> None:
         """Update the current playback position, in seconds (thread-safe)."""
         self.timestamp_received.emit(current_time)
+
+    def set_playback_state(self, playing: bool) -> None:
+        """Update whether the video is playing (thread-safe). Controls the transport icon."""
+        self.playback_state_received.emit(playing)
 
     def mark_activity(self) -> None:
         """Note an extension message arrived, to keep the overlay awake (thread-safe)."""
@@ -268,6 +274,7 @@ class LyricsOverlay(QWidget):
         self.loading_requested.connect(self._apply_loading)
         self.no_lyrics_requested.connect(self._apply_no_lyrics)
         self.timestamp_received.connect(self._apply_timestamp)
+        self.playback_state_received.connect(self._apply_playback_state)
         self.activity_pinged.connect(self._apply_activity)
         self.gaming_toggle_requested.connect(self._on_gaming_toggle)
 
@@ -470,7 +477,13 @@ class LyricsOverlay(QWidget):
             painter.drawRect(QRectF(x0, cy - 1.3 * u, 0.5 * u, 2.6 * u))
 
         if kind == "playpause":
-            triangle([(cx - 1.1 * u, cy - 1.3 * u), (cx - 1.1 * u, cy + 1.3 * u), (cx + 1.3 * u, cy)])
+            if self._paused:
+                # Paused — draw a play triangle ▸
+                triangle([(cx - 1.1 * u, cy - 1.3 * u), (cx - 1.1 * u, cy + 1.3 * u), (cx + 1.3 * u, cy)])
+            else:
+                # Playing — draw two pause bars ▍▍
+                bar(cx - 0.7 * u)
+                bar(cx + 0.2 * u)
         elif kind == "next":
             triangle([(cx - 1.3 * u, cy - 1.3 * u), (cx - 1.3 * u, cy + 1.3 * u), (cx + 0.7 * u, cy)])
             bar(cx + 0.9 * u)
@@ -714,6 +727,12 @@ class LyricsOverlay(QWidget):
         new_index = self._find_active_line()
         if new_index != self._current_line_index:
             self._current_line_index = new_index
+        self.update()
+
+    @Slot(bool)
+    def _apply_playback_state(self, playing: bool) -> None:
+        """Apply the video play/pause state (runs on the Qt thread)."""
+        self._paused = not playing
         self.update()
 
     @Slot()
