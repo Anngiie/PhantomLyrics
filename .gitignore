@@ -99,3 +99,6 @@ phantom_lyrics.local.*
 build/
 dist/
 *.spec.bak
+
+# Firefox enterprise policy (user-specific path, not for distribution)
+policies.json

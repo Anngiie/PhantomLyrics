@@ -1,10 +1,20 @@
 {
   "manifest_version": 2,
   "name": "Phantom Lyrics - YouTube Timestamp",
-  "version": "1.0",
-  "description": "Sends the current YouTube video timestamp to the Phantom Lyrics desktop app via WebSocket.",
+  "version": "1.1",
+  "description": "Sends the current YouTube video timestamp and title to the Phantom Lyrics desktop application running on your own computer (localhost WebSocket port 8765) for synchronized lyrics display. No data is sent to any external server.",
 
   "permissions": ["*://*.youtube.com/*"],
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "phantom-lyrics-youtube@andjela.dev",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
 
   "content_scripts": [
     {
