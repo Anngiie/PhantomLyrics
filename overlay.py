@@ -70,12 +70,17 @@ SYNC_BTN_SIZE = 22            # Button side length in pixels
 SYNC_BTN_SPACING = 6          # Gap between buttons
 SYNC_BTN_MARGIN = 8           # Margin from the overlay's top-right edge
 
-# Toast text shown briefly after a transport button press
-_TRANSPORT_LABELS = {
+# Toast text shown briefly after a control button press
+_CONTROL_LABELS = {
+    "minus": "Sync -0.5s",
     "prev": "Previous",
     "playpause": "Play / Pause",
     "next": "Next",
+    "plus": "Sync +0.5s",
 }
+
+# Order of buttons in the single control row
+_CONTROL_ROW = ["minus", "prev", "playpause", "next", "plus"]
 
 # Persist the overlay position across runs
 CONFIG_DIR = Path.home() / ".phantom_lyrics"
@@ -128,8 +133,7 @@ class LyricsOverlay(QWidget):
         self._paused: bool = False                         # Video playback state (for button icon)
         self._sync_offset: float = 0.0                    # User-adjusted lyric offset (seconds)
         self._hovered: bool = False                       # Mouse is over the overlay?
-        self._sync_btn_rects: dict[str, QRect] = {}       # Button hit-test rects (set in paintEvent)
-        self._transport_btn_rects: dict[str, QRect] = {}  # Transport button hit-test rects
+        self._control_btn_rects: dict[str, QRect] = {}  # Button hit-test rects (set in paintEvent)
         self._lyric_line_rects: dict[int, tuple[QRect, float]] = {}  # idx → (rect, timestamp)
         self._pressed_btn: str | None = None              # Which button is flashing as pressed
         self._pressed_until: float = 0.0                  # Monotonic time the press flash ends
@@ -196,14 +200,14 @@ class LyricsOverlay(QWidget):
         logger.info("Overlay config applied and resized.")
 
     def _compute_height(self, cfg: Config) -> int:
-        """Window height: title row + lyric lines + transport row + sync row + toast."""
+        """Window height: title row + lyric lines + one control row + toast."""
         fm = QFontMetrics(QFont(cfg.font_family, cfg.font_size))
         line_height = fm.height() + cfg.line_spacing_px
-        button_rows = 2 * (SYNC_BTN_SIZE + SYNC_BTN_MARGIN) + line_height
+        control_row = SYNC_BTN_SIZE + SYNC_BTN_MARGIN
         return (
             (cfg.max_visible_lines * line_height)
             + line_height
-            + button_rows
+            + control_row
             + cfg.side_padding_px
         )
 
@@ -424,40 +428,43 @@ class LyricsOverlay(QWidget):
 
             y_offset += line_height
 
-        # ── Transport + sync buttons (when hovering, or during feedback) ───
+        # ── Control row (sync + transport in one line, when hovering or during feedback) ──
         show_buttons = self._hovered or (
             self._feedback_text and time.monotonic() < self._feedback_until
         )
         if show_buttons:
-            transport_bottom = self._draw_transport_buttons(painter, y_offset)
-            self._draw_sync_buttons(painter, fm, transport_bottom)
+            self._draw_control_row(painter, y_offset)
         else:
-            self._transport_btn_rects.clear()
-            self._sync_btn_rects.clear()
+            self._control_btn_rects.clear()
 
         painter.end()
 
     # ─── Internals ────────────────────────────────────────────
 
-    def _draw_transport_buttons(self, painter: QPainter, top_y: int) -> int:
+    def _draw_control_row(self, painter: QPainter, top_y: int) -> None:
         """
-        Draw previous / play-pause / next centered below the lyrics. Icons are
-        drawn as vector shapes so they look the same regardless of system fonts.
-        A just-pressed button flashes brighter. Returns the row's bottom y.
+        Draw a single row of control buttons below the lyrics:
+        [−] [⏮] [▶/⏸] [⏭] [+]
+
+        Sync buttons use text labels; transport buttons use vector icons.
+        A just-pressed button flashes brighter.
         """
         size = SYNC_BTN_SIZE
         spacing = SYNC_BTN_SPACING
-        ids = ["prev", "playpause", "next"]
-        total_width = len(ids) * size + (len(ids) - 1) * spacing
+        btn_ids = _CONTROL_ROW
+        total_width = len(btn_ids) * size + (len(btn_ids) - 1) * spacing
         start_x = (self._cfg.overlay_width - total_width) // 2
         btn_y = top_y + SYNC_BTN_MARGIN
         pressed = self._pressed_btn if time.monotonic() < self._pressed_until else None
 
-        self._transport_btn_rects.clear()
-        for i, btn_id in enumerate(ids):
+        self._control_btn_rects.clear()
+
+        for i, btn_id in enumerate(btn_ids):
             x = start_x + i * (size + spacing)
             rect = QRect(x, btn_y, size, size)
-            self._transport_btn_rects[btn_id] = rect
+            self._control_btn_rects[btn_id] = rect
+
+            # Button background
             if btn_id == pressed:
                 painter.setPen(QPen(QColor(255, 255, 255, 140)))
                 painter.setBrush(QBrush(QColor(255, 255, 255, 90)))
@@ -465,8 +472,39 @@ class LyricsOverlay(QWidget):
                 painter.setPen(QPen(QColor(255, 255, 255, 40)))
                 painter.setBrush(QBrush(QColor(0, 0, 0, 120)))
             painter.drawRoundedRect(rect, 4, 4)
-            self._draw_transport_icon(painter, rect, btn_id, pressed=(btn_id == pressed))
-        return btn_y + size
+
+            is_icon = btn_id in ("prev", "playpause", "next")
+            if is_icon:
+                self._draw_transport_icon(painter, rect, btn_id, pressed=(btn_id == pressed))
+            else:
+                # Text label for sync buttons
+                btn_font = QFont(self._cfg.font_family, max(self._cfg.font_size - 4, 8))
+                painter.setFont(btn_font)
+                label_map = {"minus": "−", "plus": "+"}
+                label_alpha = 255 if btn_id == pressed else 200
+                painter.setPen(QPen(QColor(255, 255, 255, label_alpha)))
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label_map[btn_id])
+
+        # Sync offset toast — shows briefly after a press
+        if self._feedback_text and time.monotonic() < self._feedback_until:
+            indicator_font = QFont(self._cfg.font_family, max(self._cfg.font_size - 4, 8))
+            painter.setFont(indicator_font)
+            painter.setPen(QPen(QColor(255, 255, 255, 220)))
+            ind_fm = QFontMetrics(indicator_font)
+            text_width = ind_fm.horizontalAdvance(self._feedback_text)
+            ix = (self._cfg.overlay_width - text_width) // 2
+            iy = btn_y + size + 4 + ind_fm.ascent()
+            painter.drawText(ix, iy, self._feedback_text)
+        elif self._hovered and abs(self._sync_offset) > 0.01:
+            offset_text = f"Sync: {self._sync_offset:+.1f}s"
+            indicator_font = QFont(self._cfg.font_family, max(self._cfg.font_size - 4, 8))
+            painter.setFont(indicator_font)
+            painter.setPen(QPen(QColor(255, 255, 255, 160)))
+            ind_fm = QFontMetrics(indicator_font)
+            text_width = ind_fm.horizontalAdvance(offset_text)
+            ix = (self._cfg.overlay_width - text_width) // 2
+            iy = btn_y + size + 4 + ind_fm.ascent()
+            painter.drawText(ix, iy, offset_text)
 
     def _draw_transport_icon(self, painter: QPainter, rect: QRect, kind: str, pressed: bool = False) -> None:
         """Paint a transport glyph (play/pause/next/prev) as vector shapes."""
@@ -500,72 +538,6 @@ class LyricsOverlay(QWidget):
             bar(cx - 1.4 * u)
 
         painter.restore()
-
-    def _draw_sync_buttons(self, painter: QPainter, fm: QFontMetrics, lyrics_bottom: int) -> None:
-        """
-        Draw small [−] [0] [+] buttons centered below the lyrics, plus a sync
-        offset indicator. Shown when hovering or during the 2s feedback window
-        after a press. Button rects are stored for hit-testing in mousePressEvent.
-
-        Args:
-            lyrics_bottom: Y coordinate of the bottom of the last lyric line.
-        """
-        btn_font = QFont(self._cfg.font_family, max(self._cfg.font_size - 4, 8))
-        size = SYNC_BTN_SIZE
-        spacing = SYNC_BTN_SPACING
-
-        # Three buttons: [−] [0] [+]
-        labels = [("minus", "\u2212"), ("reset", "0"), ("plus", "+")]
-        total_width = len(labels) * size + (len(labels) - 1) * spacing
-        start_x = (self._cfg.overlay_width - total_width) // 2
-        btn_y = lyrics_bottom + SYNC_BTN_MARGIN
-
-        self._sync_btn_rects.clear()
-
-        painter.setFont(btn_font)
-
-        pressed = self._pressed_btn if time.monotonic() < self._pressed_until else None
-
-        for i, (btn_id, label) in enumerate(labels):
-            x = start_x + i * (size + spacing)
-            rect = QRect(x, btn_y, size, size)
-            self._sync_btn_rects[btn_id] = rect
-
-            # Button background — brighter when pressed
-            if btn_id == pressed:
-                painter.setPen(QPen(QColor(255, 255, 255, 120)))
-                painter.setBrush(QBrush(QColor(255, 255, 255, 80)))
-            else:
-                painter.setPen(QPen(QColor(255, 255, 255, 40)))
-                painter.setBrush(QBrush(QColor(0, 0, 0, 120)))
-            painter.drawRoundedRect(rect, 4, 4)
-
-            # Button label — brighter when pressed
-            label_alpha = 255 if btn_id == pressed else 200
-            painter.setPen(QPen(QColor(255, 255, 255, label_alpha)))
-            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
-
-        # Sync offset toast — shows for 2s after a press (even if not hovering)
-        if self._feedback_text and time.monotonic() < self._feedback_until:
-            indicator_font = QFont(self._cfg.font_family, max(self._cfg.font_size - 4, 8))
-            painter.setFont(indicator_font)
-            painter.setPen(QPen(QColor(255, 255, 255, 220)))
-            ind_fm = QFontMetrics(indicator_font)
-            text_width = ind_fm.horizontalAdvance(self._feedback_text)
-            ix = (self._cfg.overlay_width - text_width) // 2
-            iy = btn_y + size + 4 + ind_fm.ascent()
-            painter.drawText(ix, iy, self._feedback_text)
-        elif self._hovered and abs(self._sync_offset) > 0.01:
-            # While hovering with a non-zero offset, show it subtly
-            offset_text = f"Sync: {self._sync_offset:+.1f}s"
-            indicator_font = QFont(self._cfg.font_family, max(self._cfg.font_size - 4, 8))
-            painter.setFont(indicator_font)
-            painter.setPen(QPen(QColor(255, 255, 255, 160)))
-            ind_fm = QFontMetrics(indicator_font)
-            text_width = ind_fm.horizontalAdvance(offset_text)
-            ix = (self._cfg.overlay_width - text_width) // 2
-            iy = btn_y + size + 4 + ind_fm.ascent()
-            painter.drawText(ix, iy, offset_text)
 
     def _draw_outlined_text(
         self,
@@ -766,24 +738,22 @@ class LyricsOverlay(QWidget):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:
-        """Handle sync button clicks, or start dragging if not on a button."""
+        """Handle button clicks, lyric seeks, or start dragging."""
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # Transport button?
-            for btn_id, rect in self._transport_btn_rects.items():
+            # Control row button? (sync + transport in one row)
+            for btn_id, rect in self._control_btn_rects.items():
                 if rect.contains(pos):
-                    self.transport_requested.emit(btn_id)
                     now = time.monotonic()
                     self._pressed_btn = btn_id
                     self._pressed_until = now + 0.18
-                    self._feedback_text = _TRANSPORT_LABELS.get(btn_id, btn_id)
+                    self._feedback_text = _CONTROL_LABELS.get(btn_id, btn_id)
                     self._feedback_until = now + 1.2
+                    if btn_id in ("minus", "plus"):
+                        self._handle_sync_button(btn_id)
+                    else:
+                        self.transport_requested.emit(btn_id)
                     self.update()
-                    return
-            # Sync nudge button?
-            for btn_id, rect in self._sync_btn_rects.items():
-                if rect.contains(pos):
-                    self._handle_sync_button(btn_id)
                     return
             # Lyric line (click to seek)?
             logger.debug(
@@ -821,8 +791,6 @@ class LyricsOverlay(QWidget):
             self._sync_offset -= SYNC_NUDGE_STEP
         elif btn_id == "plus":
             self._sync_offset += SYNC_NUDGE_STEP
-        elif btn_id == "reset":
-            self._sync_offset = 0.0
         else:
             return
 

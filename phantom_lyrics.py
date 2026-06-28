@@ -12,6 +12,7 @@ import logging
 import signal
 import sys
 import threading
+import time
 from typing import Optional
 
 from PySide6.QtCore import QTimer
