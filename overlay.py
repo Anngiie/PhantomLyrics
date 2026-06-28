@@ -1,21 +1,9 @@
 """
 Phantom Lyrics - Transparent Overlay Window
-=============================================
-A frameless, always-on-top, transparent PySide6 window
-that displays song lyrics in a "ghost-like" style.
 
-Features:
-  - 100% transparent background (only the text is visible).
-  - Drag-and-drop: click and drag the overlay anywhere on screen, anytime.
-    The position is saved and restored on the next launch.
-  - Always-on-top: sits above League of Legends, IDEs, etc.
-  - Active lyric line is brighter (~85% opacity), others are dimmer (~40%).
-  - Auto-positions to the bottom-left corner of the screen on first run.
-  - Resizes vertically to fit the number of visible lyric lines.
-
-Windows-specific:
-  - Uses win32gui to set WS_EX_LAYERED and WS_EX_NOACTIVATE
-    (per-pixel transparency + no taskbar/Alt+Tab entry, no focus stealing).
+A frameless, always-on-top, transparent window that paints the lyrics directly,
+with hover controls for sync offset and playback. The whole window is draggable.
+Transparency and click-through use win32 on Windows and Qt flags elsewhere.
 """
 
 import json
@@ -28,6 +16,8 @@ from PySide6.QtCore import (
     Qt,
     QTimer,
     QRect,
+    QRectF,
+    QPointF,
     Signal,
     Slot,
 )
@@ -38,6 +28,7 @@ from PySide6.QtGui import (
     QPen,
     QBrush,
     QPainterPath,
+    QPolygonF,
     QFontMetrics,
 )
 from PySide6.QtWidgets import (
@@ -79,6 +70,14 @@ SYNC_BTN_SIZE = 22            # Button side length in pixels
 SYNC_BTN_SPACING = 6          # Gap between buttons
 SYNC_BTN_MARGIN = 8           # Margin from the overlay's top-right edge
 
+# Toast text shown briefly after a transport button press
+_TRANSPORT_LABELS = {
+    "prev": "Previous",
+    "playpause": "Play / Pause",
+    "next": "Next",
+    "stop": "Stop",
+}
+
 # Persist the overlay position across runs
 CONFIG_DIR = Path.home() / ".phantom_lyrics"
 POSITION_FILE = CONFIG_DIR / "overlay_position.json"
@@ -108,7 +107,8 @@ class LyricsOverlay(QWidget):
     timestamp_received = Signal(float)                 # current playback time (s)
     activity_pinged = Signal()
     sync_offset_changed = Signal(str, str, float)      # (artist, title, new_offset)
-    gaming_toggle_requested = Signal()                 # Global hotkey → Qt thread
+    gaming_toggle_requested = Signal()                 # global hotkey to Qt thread
+    transport_requested = Signal(str)                  # "prev"/"playpause"/"next"/"stop"
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -127,6 +127,7 @@ class LyricsOverlay(QWidget):
         self._sync_offset: float = 0.0                    # User-adjusted lyric offset (seconds)
         self._hovered: bool = False                       # Mouse is over the overlay?
         self._sync_btn_rects: dict[str, QRect] = {}       # Button hit-test rects (set in paintEvent)
+        self._transport_btn_rects: dict[str, QRect] = {}  # Transport button hit-test rects
         self._pressed_btn: str | None = None              # Which button was just pressed (flash effect)
         self._feedback_text: str = ""                     # Temporary toast text (e.g. "Sync: +1.0s")
         self._feedback_until: float = 0.0                 # Monotonic time when the toast expires
@@ -155,18 +156,8 @@ class LyricsOverlay(QWidget):
         lyric_lines: list[tuple[float, str]],
         sync_offset: float = 0.0,
     ) -> None:
-        """
-        Replace the current lyrics with a new song.
-
-        Thread-safe — can be called from any thread.
-
-        Args:
-            artist: Artist name (for the subtle header).
-            title: Song title (for the subtle header).
-            lyric_lines: List of (timestamp_seconds, lyric_text) tuples,
-                         sorted by timestamp.
-            sync_offset: Saved lyric sync offset for this song (seconds).
-        """
+        """Replace the current lyrics with a new song (thread-safe). lyric_lines
+        is a list of (timestamp_seconds, text) tuples sorted by timestamp."""
         self.lyrics_received.emit(artist, title, lyric_lines, sync_offset)
 
     def set_sync_offset(self, offset: float) -> None:
@@ -175,21 +166,11 @@ class LyricsOverlay(QWidget):
         self.update()
 
     def set_timestamp(self, current_time: float) -> None:
-        """
-        Update the current playback position.
-
-        Thread-safe — can be called from any thread.
-
-        Args:
-            current_time: Current playback position in seconds.
-        """
+        """Update the current playback position, in seconds (thread-safe)."""
         self.timestamp_received.emit(current_time)
 
     def mark_activity(self) -> None:
-        """
-        Note that a WebSocket message arrived (music is playing).
-        Thread-safe — can be called from any thread.
-        """
+        """Note an extension message arrived, to keep the overlay awake (thread-safe)."""
         self.activity_pinged.emit()
 
     def set_visible(self, visible: bool) -> None:
@@ -200,22 +181,23 @@ class LyricsOverlay(QWidget):
             self.hide()
 
     def apply_config(self, config: Config) -> None:
-        """Apply updated config settings at runtime (from the settings dialog)."""
+        """Apply updated settings from the settings dialog and resize."""
         self._cfg = config
-        # Recalculate window size for the new font/layout settings
-        font = QFont(config.font_family, config.font_size)
-        fm = QFontMetrics(font)
-        line_height = fm.height() + config.line_spacing_px
-        buttons_space = SYNC_BTN_SIZE + SYNC_BTN_MARGIN
-        window_height = (
-            (config.max_visible_lines * line_height)
-            + line_height
-            + buttons_space
-            + config.side_padding_px
-        )
-        self.setFixedSize(config.overlay_width, window_height)
+        self.setFixedSize(config.overlay_width, self._compute_height(config))
         self.update()
         logger.info("Overlay config applied and resized.")
+
+    def _compute_height(self, cfg: Config) -> int:
+        """Window height: title row + lyric lines + transport row + sync row + toast."""
+        fm = QFontMetrics(QFont(cfg.font_family, cfg.font_size))
+        line_height = fm.height() + cfg.line_spacing_px
+        button_rows = 2 * (SYNC_BTN_SIZE + SYNC_BTN_MARGIN) + line_height
+        return (
+            (cfg.max_visible_lines * line_height)
+            + line_height
+            + button_rows
+            + cfg.side_padding_px
+        )
 
     def reset_position(self) -> None:
         """Move the overlay back to its default bottom-left position."""
@@ -231,24 +213,11 @@ class LyricsOverlay(QWidget):
         logger.info("Overlay position reset to bottom-left.")
 
     def show_no_lyrics(self, artist: str, title: str) -> None:
-        """
-        Show a "No lyrics found" message for the given song.
-
-        Thread-safe — can be called from any thread.
-
-        Args:
-            artist: Artist name (for the subtle header).
-            title: Song title (for the subtle header).
-        """
+        """Show a "No lyrics found" message for the given song (thread-safe)."""
         self.no_lyrics_requested.emit(artist, title)
 
     def show_loading(self) -> None:
-        """
-        Show a "Loading..." message while waiting for the lock-on to settle
-        or for lyrics to be fetched.
-
-        Thread-safe — can be called from any thread.
-        """
+        """Show a "Loading..." message while lyrics are fetched (thread-safe)."""
         self.loading_requested.emit()
 
     # ─── Initialization ───────────────────────────────────────
@@ -274,18 +243,7 @@ class LyricsOverlay(QWidget):
         else:
             screen_geom = QRect(0, 0, 1920, 1080)
 
-        # Calculate window height: song info header + visible lyric lines
-        font = QFont(self._cfg.font_family, self._cfg.font_size)
-        fm = QFontMetrics(font)
-        line_height = fm.height() + self._cfg.line_spacing_px
-        # Height: song info header + lyric lines + space for sync buttons below
-        buttons_space = SYNC_BTN_SIZE + SYNC_BTN_MARGIN
-        window_height = (
-            (self._cfg.max_visible_lines * line_height)
-            + line_height
-            + buttons_space
-            + self._cfg.side_padding_px
-        )
+        window_height = self._compute_height(self._cfg)
 
         x = self._cfg.side_padding_px
         y = screen_geom.bottom() - window_height - self._cfg.bottom_padding_px
@@ -451,16 +409,74 @@ class LyricsOverlay(QWidget):
             self._draw_outlined_text(painter, center_x(line_text), y_offset + fm.ascent(), line_text, alpha)
             y_offset += line_height
 
-        # ── Sync nudge buttons (when hovering, or during feedback) ───
+        # ── Transport + sync buttons (when hovering, or during feedback) ───
         show_buttons = self._hovered or (
             self._feedback_text and time.monotonic() < self._feedback_until
         )
         if show_buttons:
-            self._draw_sync_buttons(painter, fm, y_offset)
+            transport_bottom = self._draw_transport_buttons(painter, y_offset)
+            self._draw_sync_buttons(painter, fm, transport_bottom)
+        else:
+            self._transport_btn_rects.clear()
+            self._sync_btn_rects.clear()
 
         painter.end()
 
     # ─── Internals ────────────────────────────────────────────
+
+    def _draw_transport_buttons(self, painter: QPainter, top_y: int) -> int:
+        """
+        Draw prev / play-pause / next / stop centered below the lyrics. Icons are
+        drawn as vector shapes so they look the same regardless of system fonts.
+        Returns the y coordinate of the row's bottom (where sync buttons start).
+        """
+        size = SYNC_BTN_SIZE
+        spacing = SYNC_BTN_SPACING
+        ids = ["prev", "playpause", "next", "stop"]
+        total_width = len(ids) * size + (len(ids) - 1) * spacing
+        start_x = (self._cfg.overlay_width - total_width) // 2
+        btn_y = top_y + SYNC_BTN_MARGIN
+
+        self._transport_btn_rects.clear()
+        for i, btn_id in enumerate(ids):
+            x = start_x + i * (size + spacing)
+            rect = QRect(x, btn_y, size, size)
+            self._transport_btn_rects[btn_id] = rect
+            painter.setPen(QPen(QColor(255, 255, 255, 40)))
+            painter.setBrush(QBrush(QColor(0, 0, 0, 120)))
+            painter.drawRoundedRect(rect, 4, 4)
+            self._draw_transport_icon(painter, rect, btn_id)
+        return btn_y + size
+
+    def _draw_transport_icon(self, painter: QPainter, rect: QRect, kind: str) -> None:
+        """Paint a transport glyph (play/pause/next/prev/stop) as vector shapes."""
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(255, 255, 255, 220)))
+        cx = rect.center().x() + 0.5
+        cy = rect.center().y() + 0.5
+        u = rect.width() * 0.16  # icon unit
+
+        def triangle(points: list[tuple[float, float]]) -> None:
+            painter.drawPolygon(QPolygonF([QPointF(px, py) for px, py in points]))
+
+        def bar(x0: float) -> None:
+            painter.drawRect(QRectF(x0, cy - 1.3 * u, 0.5 * u, 2.6 * u))
+
+        if kind == "playpause":
+            triangle([(cx - 1.1 * u, cy - 1.3 * u), (cx - 1.1 * u, cy + 1.3 * u), (cx + 1.3 * u, cy)])
+        elif kind == "stop":
+            s = 1.2 * u
+            painter.drawRect(QRectF(cx - s, cy - s, 2 * s, 2 * s))
+        elif kind == "next":
+            triangle([(cx - 1.3 * u, cy - 1.3 * u), (cx - 1.3 * u, cy + 1.3 * u), (cx + 0.7 * u, cy)])
+            bar(cx + 0.9 * u)
+        elif kind == "prev":
+            triangle([(cx + 1.3 * u, cy - 1.3 * u), (cx + 1.3 * u, cy + 1.3 * u), (cx - 0.7 * u, cy)])
+            bar(cx - 1.4 * u)
+
+        painter.restore()
 
     def _draw_sync_buttons(self, painter: QPainter, fm: QFontMetrics, lyrics_bottom: int) -> None:
         """
@@ -540,14 +556,8 @@ class LyricsOverlay(QWidget):
         text: str,
         alpha: int,
     ) -> None:
-        """
-        Draw text with a black outline (stroke) and white fill — like TV
-        subtitles. The outline wraps every letter evenly (no offset shadow),
-        so the white text stays readable on any background.
-
-        Implementation: add the text to a QPainterPath, then stroke the path
-        with a thick black pen (the outline) and fill it with white (the text).
-        """
+        """Draw white text with a thick black outline (subtitle style) by stroking
+        and filling a QPainterPath, so it stays readable on any background."""
         path = QPainterPath()
         path.addText(x, baseline, painter.font(), text)
 
@@ -570,13 +580,7 @@ class LyricsOverlay(QWidget):
         painter.drawPath(path)
 
     def _get_visible_window(self) -> list[tuple[int, str]]:
-        """
-        Determine which lyric lines should be visible based on the
-        current active line index. Shows lines around the active one.
-
-        Returns:
-            List of (original_index, text) tuples to display.
-        """
+        """Lyric lines to show as (original_index, text), windowed around the active line."""
         if not self._lyric_lines:
             return []
 
@@ -599,13 +603,7 @@ class LyricsOverlay(QWidget):
         return [(i, self._lyric_lines[i][1]) for i in range(start, end)]
 
     def _find_active_line(self) -> int:
-        """
-        Find the lyric line whose timestamp is <= (current_time + sync_offset)
-        and is the most recent one.
-
-        Returns:
-            Index of the active line, or -1 if no line is active yet.
-        """
+        """Index of the latest lyric line at or before (current_time + sync_offset), or -1."""
         if not self._lyric_lines:
             return -1
 
@@ -723,12 +721,20 @@ class LyricsOverlay(QWidget):
         """Handle sync button clicks, or start dragging if not on a button."""
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
-            # Check if the click landed on a sync button
+            # Transport button?
+            for btn_id, rect in self._transport_btn_rects.items():
+                if rect.contains(pos):
+                    self.transport_requested.emit(btn_id)
+                    self._feedback_text = _TRANSPORT_LABELS.get(btn_id, btn_id)
+                    self._feedback_until = time.monotonic() + 1.2
+                    self.update()
+                    return
+            # Sync nudge button?
             for btn_id, rect in self._sync_btn_rects.items():
                 if rect.contains(pos):
                     self._handle_sync_button(btn_id)
                     return
-            # Not on a button — start dragging
+            # Not on a button, start dragging
             self._drag_offset = event.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, event) -> None:
@@ -799,60 +805,54 @@ class LyricsOverlay(QWidget):
     # ─── Window styles (platform-specific) ───────────────────
 
     def showEvent(self, event) -> None:
-        """Apply transparency / no-focus styles after the window is shown."""
+        """Re-apply platform window styles after the window is shown."""
         super().showEvent(event)
-        self._apply_window_styles(click_through=False)
+        self._apply_window_styles(click_through=self._gaming_mode)
 
     def _apply_window_styles(self, click_through: bool = False) -> None:
+        """Apply click-through (gaming mode). win32 on Windows, Qt flags elsewhere."""
+        if sys.platform == "win32":
+            self._apply_win32_styles(click_through)
+        else:
+            self._apply_qt_click_through(click_through)
+
+    def _apply_qt_click_through(self, click_through: bool) -> None:
+        """Cross-platform click-through via Qt (Linux/macOS)."""
+        flag = Qt.WindowType.WindowTransparentForInput
+        if bool(self.windowFlags() & flag) == click_through:
+            return  # already in the desired state; avoid a needless re-show
+        geo = self.geometry()
+        self.setWindowFlag(flag, click_through)
+        self.setGeometry(geo)
+        self.show()  # re-show so the flag change takes effect
+
+    def _apply_win32_styles(self, click_through: bool) -> None:
         """
-        Set Win32 extended styles for the overlay.
-
-        WS_EX_LAYERED    → required for per-pixel alpha (transparent background).
-        WS_EX_NOACTIVATE → window never steals focus (your game keeps focus
-                           even when you click/drag the overlay).
-        WS_EX_TRANSPARENT → click-through: mouse events pass through to the
-                            game behind the overlay (gaming mode).
-
-        Args:
-            click_through: True for gaming mode (clicks pass through);
-                           False for draggable mode (overlay is grabbable).
+        Windows extended styles: WS_EX_LAYERED (per-pixel alpha), WS_EX_NOACTIVATE
+        (never steal focus), and WS_EX_TRANSPARENT for click-through. This path is
+        kept on Windows because it behaves best over fullscreen games.
         """
-        if sys.platform != "win32":
-            logger.debug("Window styles are only applied on Windows.")
-            return
-
         try:
             import win32gui
             import win32con
 
             hwnd = int(self.winId())
-
             ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-            ex_style |= win32con.WS_EX_LAYERED
-            ex_style |= win32con.WS_EX_NOACTIVATE
-
+            ex_style |= win32con.WS_EX_LAYERED | win32con.WS_EX_NOACTIVATE
             if click_through:
                 ex_style |= win32con.WS_EX_TRANSPARENT
             else:
                 ex_style &= ~win32con.WS_EX_TRANSPARENT
-
             win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
 
-            # Force Windows to re-read the extended style and re-evaluate
-            # hit-testing. Without this, the click-through change may not
-            # take effect (especially noticeable in fullscreen games like LoL).
+            # Force Windows to re-read the style and re-evaluate hit-testing.
             win32gui.SetWindowPos(
                 hwnd, 0, 0, 0, 0, 0,
-                win32con.SWP_NOMOVE
-                | win32con.SWP_NOSIZE
-                | win32con.SWP_NOZORDER
-                | win32con.SWP_NOACTIVATE
-                | win32con.SWP_FRAMECHANGED,
+                win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOZORDER
+                | win32con.SWP_NOACTIVATE | win32con.SWP_FRAMECHANGED,
             )
-
-            logger.debug(f"Window styles applied (click_through={click_through})")
-
+            logger.debug("win32 styles applied (click_through=%s)", click_through)
         except ImportError:
-            logger.warning("pywin32 not available — window styles not applied.")
+            logger.warning("pywin32 not available, window styles not applied.")
         except Exception:
-            logger.exception("Failed to apply window styles.")
+            logger.exception("Failed to apply win32 window styles.")

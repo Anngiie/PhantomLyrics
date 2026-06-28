@@ -21,10 +21,10 @@ YouTube ──► Browser Extension ──WebSocket──► Python App
                                     PySide6 Overlay Window ◄──
 ```
 
-1. **Browser Extension** (Firefox or Chromium) sends the exact video timestamp and page title via WebSocket (works even with the YouTube tab in the background).
-2. **Title Parser** cleans the YouTube page title into "Artist - Title" (handles en-dash, em-dash, tab counters, video tags).
+1. **Browser Extension** (Firefox or Chromium) sends the video timestamp and track info via WebSocket, and accepts playback commands back (works even with the YouTube tab in the background).
+2. **Track info** comes from the page's MediaSession metadata (artist, title, album) when the browser provides it, falling back to parsing the page title.
 3. **Lyrics Fetcher** queries LRCLib first, then falls back to NetEase Cloud Music for tracks LRCLib doesn't have. Results are cached to disk.
-4. **PySide6 Overlay** displays lyrics with a transparent, always-on-top, free-draggable window with subtitle-style outlined text.
+4. **PySide6 Overlay** displays lyrics in a transparent, always-on-top, draggable window, with hover controls for sync offset and playback.
 
 ## Project Structure
 
@@ -57,6 +57,8 @@ Phantom Lyrics/
 ```powershell
 pip install -r requirements.txt
 ```
+
+Runs on Windows and Linux. On Windows you also get win32-based click-through and window management via `pywin32`; on Linux the overlay uses Qt's cross-platform transparency and click-through, and `pywin32` is skipped automatically.
 
 ### 2. Load the Browser Extension
 
@@ -119,7 +121,7 @@ Tests cover the pure functions: title cleaning, artist/title splitting, LRC pars
 
 ## System Tray
 
-When the app is running, a tray icon appears in the Windows system tray:
+When the app is running, a tray icon appears in your system tray:
 
 - **Left-click** — toggle the overlay visibility (show/hide).
 - **Right-click → Reset position** — move the overlay back to the bottom-left corner.
@@ -152,6 +154,10 @@ If the synced lyrics are slightly ahead or behind the audio, you can nudge them:
 5. A `Sync: +1.0s` toast appears for 2 seconds after each press so you see the current offset.
 6. The offset is **saved per-song** in the lyrics cache — next time you play the same song, the offset is restored automatically.
 
+## Playback Controls
+
+Hover the overlay to reveal transport buttons below the lyrics: previous, play/pause, next, and stop. Pressing one controls the YouTube tab that is currently driving the lyrics, so you can skip or pause without switching back to the browser.
+
 ## Auto-hide
 
 The overlay fades out after ~10 seconds without any data from the extension — i.e. when the YouTube tab is **closed or navigated away** and the extension stops reporting. It fades back in the moment a tab starts reporting again.
@@ -160,12 +166,11 @@ While a video is simply **paused** the overlay stays put — pausing doesn't hid
 
 ## Multi-Tab Support
 
-If you have multiple YouTube tabs open, the app uses **lock-on + time-advance verification** to ensure only the tab that's actually playing drives the lyrics:
+If you have multiple YouTube tabs open, only one drives the lyrics at a time:
 
-- The first tab with actively advancing playback claims the lock.
-- Other tabs are ignored entirely (no flicker between songs).
-- The lock releases when the active tab pauses, navigates to a new video, or closes.
-- A glitchy background tab can't steal the lock — its `currentTime` isn't advancing.
+- The first tab that reports it is playing claims the lock.
+- Other tabs are ignored, so the lyrics don't flicker between songs.
+- The lock releases when the active tab pauses, navigates to a new video, or closes, letting another playing tab take over.
 
 ## Lyrics Sources
 

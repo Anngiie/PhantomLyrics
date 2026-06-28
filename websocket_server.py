@@ -59,6 +59,7 @@ class LyricsWebSocketServer:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected_clients: set = set()
+        self._clients_by_id: dict = {}   # client_id -> websocket, for sending back
 
     # ─── Public API ──────────────────────────────────────────
 
@@ -106,6 +107,19 @@ class LyricsWebSocketServer:
         """Number of currently connected WebSocket clients."""
         return len(self._connected_clients)
 
+    def send_command(self, client_id: int, command: dict) -> None:
+        """
+        Send a JSON command to one connected client. Thread-safe: schedules the
+        send on the server's event loop. No-op if the client is gone.
+        """
+        if not self._loop:
+            return
+        ws = self._clients_by_id.get(client_id)
+        if ws is None:
+            return
+        payload = json.dumps(command)
+        asyncio.run_coroutine_threadsafe(ws.send(payload), self._loop)
+
     # ─── Internals ───────────────────────────────────────────
 
     def _run_event_loop(self) -> None:
@@ -145,6 +159,7 @@ class LyricsWebSocketServer:
         """
         self._connected_clients.add(ws)
         client_id = id(ws)
+        self._clients_by_id[client_id] = ws
         client_addr = ws.remote_address
         logger.info(f"Client connected: {client_addr} (total: {len(self._connected_clients)})")
 
@@ -166,5 +181,6 @@ class LyricsWebSocketServer:
             logger.exception(f"Error handling client {client_addr}")
         finally:
             self._connected_clients.discard(ws)
+            self._clients_by_id.pop(client_id, None)
             if self.on_disconnect:
                 self.on_disconnect(client_id)

@@ -1,76 +1,58 @@
 /**
- * Phantom Lyrics - YouTube Timestamp Content Script
+ * Phantom Lyrics - YouTube content script (Chrome / Brave / Edge / Opera)
  *
- * Runs on YouTube video pages. Connects to the local Python WebSocket
- * server and sends the current video timestamp every second so the
- * desktop app can sync lyrics in real-time.
- *
- * Works on Chrome, Brave, Edge, Opera, and any Chromium-based browser.
- *
- * Load this extension via:
- *   chrome://extensions (or brave://extensions, edge://extensions, opera://extensions)
- *   → Enable "Developer mode"
- *   → "Load unpacked"
- *   → Select the chrome_extension/ folder.
+ * Reports the playing track to the local Phantom Lyrics app over a WebSocket
+ * and accepts playback commands back from it. Track info comes from the page's
+ * MediaSession metadata when available, with the page title as a fallback.
  */
 
 (function () {
     "use strict";
 
-    // ─── Configuration ───────────────────────────────────────────
-
     const WS_URL = "ws://localhost:8765";
-    const SEND_INTERVAL_MS = 1000; // Send timestamp every second
-
-    // ─── State ───────────────────────────────────────────────────
+    const SEND_INTERVAL_MS = 1000;
 
     let socket = null;
     let intervalId = null;
     let reconnectTimeout = null;
-    let wasConnected = false;
 
-    // ─── Helpers ─────────────────────────────────────────────────
-
-    /**
-     * Find the active video element on the page.
-     * YouTube sometimes has multiple <video> tags (ads, thumbnails, etc.).
-     * We want the main content video.
-     */
+    // Pick the main content video (YouTube also has ad/thumbnail videos).
     function findVideoElement() {
         const videos = document.querySelectorAll("video");
-        // Return the first video that has a non-zero duration and is visible
         for (const v of videos) {
-            if (v.duration && v.duration > 0 && v.offsetParent !== null) {
-                return v;
-            }
+            if (v.duration && v.duration > 0 && v.offsetParent !== null) return v;
         }
-        // Fallback: just return the first video with duration
         for (const v of videos) {
-            if (v.duration && v.duration > 0) {
-                return v;
-            }
+            if (v.duration && v.duration > 0) return v;
         }
         return null;
     }
 
-    /**
-     * Get the current track info from the page title.
-     * We send this so the Python app can detect title changes
-     * without polling (optional optimization).
-     */
-    function getCurrentTitle() {
-        return document.title || "";
+    // Structured track info from the MediaSession API (YouTube and YT Music set
+    // this). Falls back to the page title when metadata is missing.
+    function getMetadata() {
+        const md = navigator.mediaSession && navigator.mediaSession.metadata;
+        if (md && md.title) {
+            let artwork = "";
+            if (md.artwork && md.artwork.length) {
+                artwork = md.artwork[md.artwork.length - 1].src || "";
+            }
+            return {
+                title: md.title || "",
+                artist: md.artist || "",
+                album: md.album || "",
+                artwork: artwork,
+                hasMetadata: true,
+            };
+        }
+        return { title: document.title || "", artist: "", album: "", artwork: "", hasMetadata: false };
     }
 
-    // ─── WebSocket Lifecycle ─────────────────────────────────────
-
     function connect() {
-        // Avoid double-connect
         if (socket && (socket.readyState === WebSocket.CONNECTING ||
                        socket.readyState === WebSocket.OPEN)) {
             return;
         }
-
         try {
             socket = new WebSocket(WS_URL);
         } catch (e) {
@@ -78,23 +60,20 @@
             scheduleReconnect();
             return;
         }
-
         socket.onopen = function () {
-            console.log("[Phantom Lyrics] Connected to Python server.");
-            wasConnected = true;
+            console.log("[Phantom Lyrics] Connected.");
             startSending();
         };
-
-        socket.onclose = function (event) {
-            console.log("[Phantom Lyrics] Disconnected:", event.code, event.reason);
+        socket.onmessage = function (event) {
+            handleCommand(event.data);
+        };
+        socket.onclose = function () {
             stopSending();
             socket = null;
             scheduleReconnect();
         };
-
-        socket.onerror = function (e) {
-            console.error("[Phantom Lyrics] WebSocket error:", e);
-            // The onclose handler will fire after this, handling cleanup.
+        socket.onerror = function () {
+            // onclose fires right after and does the cleanup.
         };
     }
 
@@ -105,7 +84,7 @@
         }
         stopSending();
         if (socket) {
-            socket.onclose = null; // Prevent reconnect loop
+            socket.onclose = null;
             socket.close(1000, "Page unload");
             socket = null;
         }
@@ -113,39 +92,63 @@
 
     function scheduleReconnect() {
         if (reconnectTimeout) return;
-        console.log("[Phantom Lyrics] Will retry connection in 3 seconds...");
         reconnectTimeout = setTimeout(function () {
             reconnectTimeout = null;
             connect();
         }, 3000);
     }
 
-    // ─── Timestamp Sending ───────────────────────────────────────
-
-    function sendTimestamp() {
-        if (!socket || socket.readyState !== WebSocket.OPEN) return;
-
+    // Playback commands from the desktop app drive the YouTube player.
+    function handleCommand(raw) {
+        let msg;
+        try { msg = JSON.parse(raw); } catch (e) { return; }
+        const cmd = msg && msg.command;
+        if (!cmd) return;
         const video = findVideoElement();
-        if (!video) return; // No video on page (e.g., browsing homepage)
+        switch (cmd) {
+            case "playpause":
+                if (video) { video.paused ? video.play() : video.pause(); }
+                break;
+            case "stop":
+                if (video) { video.pause(); try { video.currentTime = 0; } catch (e) {} }
+                break;
+            case "next":
+                clickButton(".ytp-next-button");
+                break;
+            case "prev":
+                clickButton(".ytp-prev-button");
+                break;
+        }
+        sendState(); // reflect the change without waiting for the next tick
+    }
 
+    function clickButton(selector) {
+        const btn = document.querySelector(selector);
+        if (btn) btn.click();
+    }
+
+    function sendState() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+        const video = findVideoElement();
+        if (!video) return;
+        const meta = getMetadata();
         const payload = {
             currentTime: video.currentTime,
             duration: video.duration,
             paused: video.paused,
-            title: getCurrentTitle(),
+            title: meta.title,
+            artist: meta.artist,
+            album: meta.album,
+            artwork: meta.artwork,
+            hasMetadata: meta.hasMetadata,
         };
-
-        try {
-            socket.send(JSON.stringify(payload));
-        } catch (e) {
-            console.error("[Phantom Lyrics] Send failed:", e);
-        }
+        try { socket.send(JSON.stringify(payload)); } catch (e) {}
     }
 
     function startSending() {
-        stopSending(); // Clear any existing interval
-        intervalId = setInterval(sendTimestamp, SEND_INTERVAL_MS);
-        sendTimestamp(); // Send immediately on connect
+        stopSending();
+        intervalId = setInterval(sendState, SEND_INTERVAL_MS);
+        sendState();
     }
 
     function stopSending() {
@@ -155,22 +158,13 @@
         }
     }
 
-    // ─── Initialization ──────────────────────────────────────────
-
     connect();
 
-    // Clean up on page unload
-    window.addEventListener("beforeunload", function () {
-        disconnect();
-    });
+    window.addEventListener("beforeunload", disconnect);
 
-    // YouTube is an SPA — navigation between videos doesn't reload the page.
-    // We re-check on URL changes (yt-navigate-finish is a custom event YouTube fires).
+    // YouTube is a single-page app; reconnect when it navigates to a new video.
     window.addEventListener("yt-navigate-finish", function () {
-        console.log("[Phantom Lyrics] YouTube navigation detected, reconnecting...");
         disconnect();
-        // Small delay to let the new page's DOM settle
         setTimeout(connect, 1500);
     });
-
 })();

@@ -50,10 +50,6 @@ class Config:
     ws_host: str = "localhost"
     ws_port: int = 8765
 
-    # ── Multi-tab lock-on ──
-    stale_lock_timeout_s: float = 3.0
-    time_advance_epsilon: float = 0.4
-
     def save(self) -> None:
         """Write the current config to disk."""
         try:
