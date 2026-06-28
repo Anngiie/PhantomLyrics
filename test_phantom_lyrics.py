@@ -13,6 +13,7 @@ Or without pytest:
 
 from title_utils import clean_youtube_title, split_artist_title
 from lyrics_fetcher import parse_lrc, LyricLine, _title_similarity
+from phantom_lyrics import playback_is_advancing
 
 
 # ─── clean_youtube_title ──────────────────────────────────────
@@ -93,6 +94,12 @@ def test_parse_multiple_timestamps_per_line():
     assert lines[0].text == "Repeated line"
     assert lines[1].text == "Repeated line"
 
+def test_parse_variable_fraction_digits():
+    lines = parse_lrc("[00:10.5]Tenths\n[00:11.34]Centis\n[00:12.345]Millis")
+    assert lines[0].timestamp == 10.5
+    assert abs(lines[1].timestamp - 11.34) < 1e-9
+    assert abs(lines[2].timestamp - 12.345) < 1e-9
+
 
 # ─── _title_similarity ────────────────────────────────────────
 
@@ -106,6 +113,27 @@ def test_similarity_no_match():
     assert _title_similarity("Completely Different", "In the End") == 0.0
 
 
+# ─── playback_is_advancing ────────────────────────────────────
+
+def test_advancing_forward_playback():
+    assert playback_is_advancing(10.0, 11.0, is_paused=False, epsilon=0.4) is True
+
+def test_not_advancing_when_paused():
+    assert playback_is_advancing(10.0, 11.0, is_paused=True, epsilon=0.4) is False
+
+def test_not_advancing_when_frozen():
+    assert playback_is_advancing(10.0, 10.1, is_paused=False, epsilon=0.4) is False
+
+def test_advancing_on_loop_restart():
+    assert playback_is_advancing(200.0, 0.0, is_paused=False, epsilon=0.4) is True
+
+def test_advancing_on_seek_back():
+    assert playback_is_advancing(120.0, 30.0, is_paused=False, epsilon=0.4) is True
+
+def test_not_advancing_on_backward_jitter():
+    assert playback_is_advancing(50.0, 49.9, is_paused=False, epsilon=0.4) is False
+
+
 # ─── Run without pytest ───────────────────────────────────────
 
 if __name__ == "__main__":
@@ -117,8 +145,12 @@ if __name__ == "__main__":
         test_split_no_separator,
         test_parse_basic_lrc, test_parse_skips_metadata_tags,
         test_parse_empty_string, test_parse_multiple_timestamps_per_line,
+        test_parse_variable_fraction_digits,
         test_similarity_exact_match, test_similarity_partial_match,
         test_similarity_no_match,
+        test_advancing_forward_playback, test_not_advancing_when_paused,
+        test_not_advancing_when_frozen, test_advancing_on_loop_restart,
+        test_advancing_on_seek_back, test_not_advancing_on_backward_jitter,
     ]
     passed = 0
     failed = 0

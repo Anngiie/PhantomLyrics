@@ -108,8 +108,11 @@ def parse_lrc(lrc_text: str) -> list[LyricLine]:
             minutes = int(tag.group(1))
             seconds = int(tag.group(2))
             centis = tag.group(3)
-            centiseconds = int(centis.ljust(2, "0")[:2]) if centis else 0
-            timestamp = minutes * 60.0 + seconds + centiseconds / 100.0
+            # The fractional part may be 1-3 digits (tenths, centiseconds, or
+            # milliseconds). Scale by its own length so [00:12.5] = 12.5s and
+            # [00:12.345] = 12.345s (instead of truncating to 12.34s).
+            fraction = int(centis) / (10 ** len(centis)) if centis else 0.0
+            timestamp = minutes * 60.0 + seconds + fraction
             lines.append(LyricLine(timestamp=timestamp, text=text))
 
     # Sort by timestamp — important for correct display order
@@ -195,6 +198,10 @@ def _load_cache_from_disk() -> None:
             payload = json.loads(_CACHE_FILE.read_text())
             for key, data in payload.items():
                 _cache[key] = _deserialize_result(data)
+            # Enforce the cap in case the on-disk file holds more than
+            # _MAX_CACHE_SIZE entries (drop the oldest first, FIFO).
+            while len(_cache) > _MAX_CACHE_SIZE:
+                del _cache[next(iter(_cache))]
             logger.info(f"Loaded {len(_cache)} cached lyrics from disk.")
     except Exception:
         logger.debug("Could not load lyrics cache from disk.", exc_info=True)
@@ -211,14 +218,6 @@ def save_sync_offset(artist: str, title: str, offset: float) -> None:
     if key in _cache:
         _cache[key].sync_offset = offset
         _save_cache_to_disk()
-
-
-def get_sync_offset(artist: str, title: str) -> float:
-    """Return the saved sync offset for a song, or 0.0 if not cached."""
-    key = _cache_key(artist, title)
-    if key in _cache:
-        return _cache[key].sync_offset
-    return 0.0
 
 
 def _cache_key(artist: str, title: str) -> str:

@@ -61,11 +61,49 @@ from config import load_config, Config
 # ─── Logging ────────────────────────────────────────────────────
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+# Also log to a file for persistent debugging
+_log_file = logging.FileHandler("phantom_lyrics_debug.log", mode="w", encoding="utf-8")
+_log_file.setLevel(logging.DEBUG)
+_log_file.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s", "%H:%M:%S"))
+logging.getLogger().addHandler(_log_file)
+
 logger = logging.getLogger("phantom_lyrics")
+
+
+# ─── Playback Helpers ────────────────────────────────────────────
+
+
+def playback_is_advancing(
+    prev_time: float,
+    current_time: float,
+    is_paused: bool,
+    epsilon: float,
+) -> bool:
+    """
+    Whether a tab's playback position indicates it is actively playing.
+
+    The position is "advancing" when it moves by more than ``epsilon`` in
+    EITHER direction:
+      - forward  → normal playback,
+      - backward → the song looped (currentTime snapped back to ~0) or the
+        user seeked backward.
+
+    Only a paused tab, or a frozen/glitched position (|delta| <= epsilon),
+    counts as not advancing.
+
+    Counting a backward jump as advancing is what keeps the active-player lock
+    held when a song is set to loop. Otherwise currentTime resetting from the
+    end back to 0 looks like a stall: the lock goes stale, the lyrics are
+    cleared, and the same song never re-fetches — so it shows "Loading..." /
+    "No lyrics found" on every loop after the first.
+    """
+    if is_paused:
+        return False
+    return abs(current_time - prev_time) > epsilon
 
 
 # ─── Main Application Controller ─────────────────────────────────
@@ -98,6 +136,10 @@ class PhantomLyricsApp:
         self._fetch_lock = threading.Lock()
         self._current_artist: str = ""
         self._current_title: str = ""
+        # A newly-detected song must repeat once before we switch to it, so a
+        # one-poll title blip (an ad, or YouTube briefly rewriting
+        # document.title) can't tear the current lyrics down mid-song.
+        self._pending_song: Optional[tuple[str, str]] = None
         # Lock-on + time-advance verification:
         # Only one tab drives lyrics at a time (no flicker), and only a tab
         # whose currentTime is actually advancing can claim/hold the lock
@@ -192,32 +234,47 @@ class PhantomLyricsApp:
         is_paused = data.get("paused", False)
         ext_title = data.get("title", "")
 
+        logger.debug(
+            "WS msg from client %d: ct=%.2f paused=%s title=%s",
+            client_id, current_time, is_paused, ext_title[:80] if ext_title else "(none)",
+        )
+
         # Any WebSocket message means the extension is alive — mark activity
         # so the overlay doesn't auto-hide (even while paused).
         self._overlay.mark_activity()
 
         now = time.monotonic()
-        is_advancing = False
 
         stale_timeout = self._config.stale_lock_timeout_s
         advance_epsilon = self._config.time_advance_epsilon
 
         with self._player_lock:
             # Determine whether this tab's playback is genuinely advancing.
-            if not is_paused and (current_time - self._last_current_time) > advance_epsilon:
-                is_advancing = True
+            # A backward jump (song set to loop, or a manual seek-back) counts
+            # as advancing too — otherwise the loop's currentTime reset looks
+            # like a stall, the lock goes stale, and the lyrics get dropped.
+            is_advancing = playback_is_advancing(
+                self._last_current_time, current_time, is_paused, advance_epsilon
+            )
 
             if self._active_player_id is None:
                 # No active player — only claim the lock if this tab is
                 # genuinely playing (currentTime advancing, not paused).
                 if is_paused or not is_advancing:
+                    logger.debug(
+                        "Tab %d not claiming lock: paused=%s advancing=%s",
+                        client_id, is_paused, is_advancing,
+                    )
                     return
                 self._active_player_id = client_id
                 self._last_current_time = current_time
                 self._last_advance_time = now
-                logger.info(f"Locked onto player tab {client_id}")
+                logger.info("🔒 Locked onto player tab %d (ct=%.2f)", client_id, current_time)
             elif self._active_player_id != client_id:
                 # A different tab — ignore it entirely while we have a lock.
+                logger.debug(
+                    "Ignoring tab %d — lock held by tab %d", client_id, self._active_player_id
+                )
                 return
             else:
                 # This is the active player.
@@ -285,10 +342,27 @@ class PhantomLyricsApp:
         if not title:
             return
 
+        logger.debug("_on_song_change: artist=%r title=%r (current=%r/%r)", artist, title, self._current_artist, self._current_title)
+
         # Avoid re-fetching the same song
         if artist == self._current_artist and title == self._current_title:
+            logger.debug("  → same song, skipping")
+            self._pending_song = None
             return
 
+        # Debounce: require a new song to be detected twice in a row before we
+        # tear down the current lyrics. This absorbs transient title blips (an
+        # ad, or YouTube momentarily rewriting document.title) that would
+        # otherwise flip a playing song to a different/garbage one and flash
+        # "No lyrics found" mid-song. The first song ever detected switches
+        # immediately — there's nothing to protect yet.
+        if self._current_title and (artist, title) != self._pending_song:
+            logger.debug("  → first sighting, pending next poll")
+            self._pending_song = (artist, title)
+            return
+
+        self._pending_song = None
+        logger.info("🎵 New song: %s - %s", artist, title)
         self._current_artist = artist
         self._current_title = title
 
@@ -313,6 +387,13 @@ class PhantomLyricsApp:
         """
         with self._fetch_lock:
             result = search_lyrics(artist, title)
+
+        # The song may have changed while this fetch was running (threading.Lock
+        # isn't FIFO, so a slow fetch can finish last) — drop stale results so
+        # they don't clobber the current song's lyrics.
+        if (artist, title) != (self._current_artist, self._current_title):
+            logger.debug(f"Discarding stale lyrics for: {artist} - {title}")
+            return
 
         if result is None:
             logger.info(f"No lyrics found for: {artist} - {title}")

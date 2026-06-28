@@ -86,7 +86,7 @@ POSITION_FILE = CONFIG_DIR / "overlay_position.json"
 # Gaming mode hotkey — toggles click-through so clicks pass through the
 # overlay to the game behind it. Uses a global hotkey (pynput) so it works
 # even when the game has keyboard focus.
-GAMING_TOGGLE_HOTKEY = '<ctrl>+<alt>+space'
+GAMING_TOGGLE_HOTKEY = '<ctrl>+<alt>+<space>'
 
 
 # ─── The Overlay Widget ────────────────────────────────────────
@@ -98,10 +98,17 @@ class LyricsOverlay(QWidget):
     for maximum control over transparency and positioning.
     """
 
-    # Signals to safely update UI state from any thread
-    update_requested = Signal()
-    sync_offset_changed = Signal(str, str, float)  # (artist, title, new_offset)
-    gaming_toggle_requested = Signal()             # Global hotkey → Qt thread
+    # Signals to safely update UI state from worker threads. Each public
+    # mutator below just emits; the connected @Slot applies the change on the
+    # Qt thread (a queued connection), so a repaint never sees half-applied
+    # state (e.g. new lyric lines against a stale highlight index).
+    lyrics_received = Signal(str, str, object, float)  # artist, title, lines, offset
+    loading_requested = Signal()
+    no_lyrics_requested = Signal(str, str)             # artist, title
+    timestamp_received = Signal(float)                 # current playback time (s)
+    activity_pinged = Signal()
+    sync_offset_changed = Signal(str, str, float)      # (artist, title, new_offset)
+    gaming_toggle_requested = Signal()                 # Global hotkey → Qt thread
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -160,17 +167,7 @@ class LyricsOverlay(QWidget):
                          sorted by timestamp.
             sync_offset: Saved lyric sync offset for this song (seconds).
         """
-        self._song_artist = artist
-        self._song_title = title
-        # Filter out empty-text lines (instrumental breaks) so they don't
-        # create blank rows — the last sung lyric stays in focus instead.
-        self._lyric_lines = [line for line in lyric_lines if line[1].strip()]
-        self._current_line_index = -1
-        self._current_time = 0.0
-        self._no_lyrics = False
-        self._loading = False
-        self._sync_offset = sync_offset
-        self.update_requested.emit()
+        self.lyrics_received.emit(artist, title, lyric_lines, sync_offset)
 
     def set_sync_offset(self, offset: float) -> None:
         """Set the lyric sync offset (seconds). Called from the Qt thread."""
@@ -186,18 +183,14 @@ class LyricsOverlay(QWidget):
         Args:
             current_time: Current playback position in seconds.
         """
-        self._current_time = current_time
-        self._last_activity_time = time.monotonic()
-        self._target_opacity = AUTO_SHOWN_OPACITY
-        self.update_requested.emit()
+        self.timestamp_received.emit(current_time)
 
     def mark_activity(self) -> None:
         """
         Note that a WebSocket message arrived (music is playing).
         Thread-safe — can be called from any thread.
         """
-        self._last_activity_time = time.monotonic()
-        self._target_opacity = AUTO_SHOWN_OPACITY
+        self.activity_pinged.emit()
 
     def set_visible(self, visible: bool) -> None:
         """Show or hide the overlay (for the tray icon toggle)."""
@@ -237,15 +230,6 @@ class LyricsOverlay(QWidget):
         self._save_position()
         logger.info("Overlay position reset to bottom-left.")
 
-    def clear(self) -> None:
-        """Clear all lyrics from the overlay."""
-        self._lyric_lines = []
-        self._current_line_index = -1
-        self._song_artist = ""
-        self._song_title = ""
-        self._no_lyrics = False
-        self.update_requested.emit()
-
     def show_no_lyrics(self, artist: str, title: str) -> None:
         """
         Show a "No lyrics found" message for the given song.
@@ -256,14 +240,7 @@ class LyricsOverlay(QWidget):
             artist: Artist name (for the subtle header).
             title: Song title (for the subtle header).
         """
-        self._song_artist = artist
-        self._song_title = title
-        self._lyric_lines = []
-        self._current_line_index = -1
-        self._current_time = 0.0
-        self._no_lyrics = True
-        self._loading = False
-        self.update_requested.emit()
+        self.no_lyrics_requested.emit(artist, title)
 
     def show_loading(self) -> None:
         """
@@ -272,12 +249,7 @@ class LyricsOverlay(QWidget):
 
         Thread-safe — can be called from any thread.
         """
-        self._lyric_lines = []
-        self._current_line_index = -1
-        self._current_time = 0.0
-        self._no_lyrics = False
-        self._loading = True
-        self.update_requested.emit()
+        self.loading_requested.emit()
 
     # ─── Initialization ───────────────────────────────────────
 
@@ -331,8 +303,14 @@ class LyricsOverlay(QWidget):
         self._timer.setInterval(TICK_INTERVAL_MS)
         self._timer.start()
 
-        # Connect signals for cross-thread updates
-        self.update_requested.connect(self._on_update_requested)
+        # Connect signals for cross-thread updates. Worker threads emit; these
+        # slots run on the Qt thread (queued), so state is applied atomically
+        # with respect to painting.
+        self.lyrics_received.connect(self._apply_lyrics)
+        self.loading_requested.connect(self._apply_loading)
+        self.no_lyrics_requested.connect(self._apply_no_lyrics)
+        self.timestamp_received.connect(self._apply_timestamp)
+        self.activity_pinged.connect(self._apply_activity)
         self.gaming_toggle_requested.connect(self._on_gaming_toggle)
 
     def _init_hotkey(self) -> None:
@@ -667,13 +645,65 @@ class LyricsOverlay(QWidget):
             self._current_line_index = new_index
         self.update()  # Repaint every tick (opacity fade needs it)
 
+    @Slot(str, str, object, float)
+    def _apply_lyrics(
+        self,
+        artist: str,
+        title: str,
+        lyric_lines: list[tuple[float, str]],
+        sync_offset: float,
+    ) -> None:
+        """Apply a fetched song's lyrics (runs on the Qt thread)."""
+        self._song_artist = artist
+        self._song_title = title
+        # Filter out empty-text lines (instrumental breaks) so they don't
+        # create blank rows — the last sung lyric stays in focus instead.
+        self._lyric_lines = [line for line in lyric_lines if line[1].strip()]
+        self._current_time = 0.0
+        self._no_lyrics = False
+        self._loading = False
+        self._sync_offset = sync_offset
+        self._current_line_index = self._find_active_line()
+        self.update()
+
     @Slot()
-    def _on_update_requested(self) -> None:
-        """Handle cross-thread update signal."""
+    def _apply_loading(self) -> None:
+        """Show the 'Loading...' message (runs on the Qt thread)."""
+        self._lyric_lines = []
+        self._current_line_index = -1
+        self._current_time = 0.0
+        self._no_lyrics = False
+        self._loading = True
+        self.update()
+
+    @Slot(str, str)
+    def _apply_no_lyrics(self, artist: str, title: str) -> None:
+        """Show the 'No lyrics found' message (runs on the Qt thread)."""
+        self._song_artist = artist
+        self._song_title = title
+        self._lyric_lines = []
+        self._current_line_index = -1
+        self._current_time = 0.0
+        self._no_lyrics = True
+        self._loading = False
+        self.update()
+
+    @Slot(float)
+    def _apply_timestamp(self, current_time: float) -> None:
+        """Apply a new playback position (runs on the Qt thread)."""
+        self._current_time = current_time
+        self._last_activity_time = time.monotonic()
+        self._target_opacity = AUTO_SHOWN_OPACITY
         new_index = self._find_active_line()
         if new_index != self._current_line_index:
             self._current_line_index = new_index
         self.update()
+
+    @Slot()
+    def _apply_activity(self) -> None:
+        """Keep the overlay awake when any extension message arrives."""
+        self._last_activity_time = time.monotonic()
+        self._target_opacity = AUTO_SHOWN_OPACITY
 
     # ─── Drag-and-Drop + Hover Buttons ──────────────────────
 

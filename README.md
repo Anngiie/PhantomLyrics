@@ -139,7 +139,7 @@ All settings are configurable via the tray icon → **Settings...** dialog and p
 | Outline width | 3 | Black stroke width around each letter (subtitle style) |
 | Active line opacity | 220 | Opacity of the active line (0-255) |
 | Inactive line opacity | 110 | Opacity of inactive lines (0-255) |
-| Auto-hide timeout | 10s | Seconds of silence before the overlay fades out |
+| Auto-hide timeout | 10s | Seconds without any data from the extension before the overlay fades out |
 
 ## Sync Offset
 
@@ -154,7 +154,9 @@ If the synced lyrics are slightly ahead or behind the audio, you can nudge them:
 
 ## Auto-hide
 
-If no music is playing for ~10 seconds (the extension stops sending timestamps), the overlay fades out automatically. It fades back in the moment music resumes. This keeps your screen clean when you pause or close YouTube.
+The overlay fades out after ~10 seconds without any data from the extension — i.e. when the YouTube tab is **closed or navigated away** and the extension stops reporting. It fades back in the moment a tab starts reporting again.
+
+While a video is simply **paused** the overlay stays put — pausing doesn't hide your lyrics. The extension keeps reporting in the background, so the overlay only disappears once there's genuinely nothing connected.
 
 ## Multi-Tab Support
 
