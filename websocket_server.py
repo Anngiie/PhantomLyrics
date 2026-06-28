@@ -157,6 +157,7 @@ class LyricsWebSocketServer:
                     continue
 
                 if self.on_timestamp:
+                    logger.debug("WS recv from %d: %s", client_id, raw_message[:120])
                     self.on_timestamp(data, client_id)
 
         except websockets.exceptions.ConnectionClosed:

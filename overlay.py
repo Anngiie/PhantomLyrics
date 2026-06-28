@@ -86,7 +86,7 @@ POSITION_FILE = CONFIG_DIR / "overlay_position.json"
 # Gaming mode hotkey — toggles click-through so clicks pass through the
 # overlay to the game behind it. Uses a global hotkey (pynput) so it works
 # even when the game has keyboard focus.
-GAMING_TOGGLE_HOTKEY = '<ctrl>+<alt>+space'
+GAMING_TOGGLE_HOTKEY = '<ctrl>+<alt>+<space>'
 
 
 # ─── The Overlay Widget ────────────────────────────────────────

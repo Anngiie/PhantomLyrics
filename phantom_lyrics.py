@@ -61,10 +61,16 @@ from config import load_config, Config
 # ─── Logging ────────────────────────────────────────────────────
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+# Also log to a file for persistent debugging
+_log_file = logging.FileHandler("phantom_lyrics_debug.log", mode="w", encoding="utf-8")
+_log_file.setLevel(logging.DEBUG)
+_log_file.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s", "%H:%M:%S"))
+logging.getLogger().addHandler(_log_file)
+
 logger = logging.getLogger("phantom_lyrics")
 
 
@@ -228,6 +234,11 @@ class PhantomLyricsApp:
         is_paused = data.get("paused", False)
         ext_title = data.get("title", "")
 
+        logger.debug(
+            "WS msg from client %d: ct=%.2f paused=%s title=%s",
+            client_id, current_time, is_paused, ext_title[:80] if ext_title else "(none)",
+        )
+
         # Any WebSocket message means the extension is alive — mark activity
         # so the overlay doesn't auto-hide (even while paused).
         self._overlay.mark_activity()
@@ -250,13 +261,20 @@ class PhantomLyricsApp:
                 # No active player — only claim the lock if this tab is
                 # genuinely playing (currentTime advancing, not paused).
                 if is_paused or not is_advancing:
+                    logger.debug(
+                        "Tab %d not claiming lock: paused=%s advancing=%s",
+                        client_id, is_paused, is_advancing,
+                    )
                     return
                 self._active_player_id = client_id
                 self._last_current_time = current_time
                 self._last_advance_time = now
-                logger.info(f"Locked onto player tab {client_id}")
+                logger.info("🔒 Locked onto player tab %d (ct=%.2f)", client_id, current_time)
             elif self._active_player_id != client_id:
                 # A different tab — ignore it entirely while we have a lock.
+                logger.debug(
+                    "Ignoring tab %d — lock held by tab %d", client_id, self._active_player_id
+                )
                 return
             else:
                 # This is the active player.
@@ -324,8 +342,11 @@ class PhantomLyricsApp:
         if not title:
             return
 
+        logger.debug("_on_song_change: artist=%r title=%r (current=%r/%r)", artist, title, self._current_artist, self._current_title)
+
         # Avoid re-fetching the same song
         if artist == self._current_artist and title == self._current_title:
+            logger.debug("  → same song, skipping")
             self._pending_song = None
             return
 
@@ -336,10 +357,12 @@ class PhantomLyricsApp:
         # "No lyrics found" mid-song. The first song ever detected switches
         # immediately — there's nothing to protect yet.
         if self._current_title and (artist, title) != self._pending_song:
+            logger.debug("  → first sighting, pending next poll")
             self._pending_song = (artist, title)
             return
 
         self._pending_song = None
+        logger.info("🎵 New song: %s - %s", artist, title)
         self._current_artist = artist
         self._current_title = title
 
