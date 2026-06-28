@@ -6,7 +6,7 @@ A "ghost-like" desktop overlay that displays synchronized song lyrics anywhere o
 
 ## In-Game Demo
 
-The overlay sits on top of your game with click-through gaming mode — you see the lyrics, but mouse clicks pass straight through to the game.
+The overlay sits on top of your game with Lock Overlay mode — you see the lyrics, but mouse clicks pass straight through to the game.
 
 ![Gaming with Phantom Lyrics](assets/game-screen1.png)
 ![Lyrics overlay during gameplay](assets/game-screen2.png)
@@ -124,6 +124,7 @@ Tests cover the pure functions: title cleaning, artist/title splitting, LRC pars
 When the app is running, a tray icon appears in your system tray:
 
 - **Left-click** — toggle the overlay visibility (show/hide).
+- **Right-click → Lock Overlay** — toggle click-through lock (mouse clicks pass through to the game).
 - **Right-click → Reset position** — move the overlay back to the bottom-left corner.
 - **Right-click → Settings...** — open the settings dialog (font, opacity, layout, auto-hide).
 - **Right-click → Quit** — exit the app.
@@ -137,26 +138,35 @@ All settings are configurable via the tray icon → **Settings...** dialog and p
 | Font family | Segoe UI | Font for lyrics (dropdown: Segoe UI, Consolas, Georgia) |
 | Font size | 14 | Font size in points |
 | Overlay width | 600 | Width of the overlay in pixels |
-| Visible lines | 3 | How many lyric lines to show (previous/current/next) |
+| Visible lines | 7 | How many lyric lines to show above/below the active line |
 | Outline width | 3 | Black stroke width around each letter (subtitle style) |
 | Active line opacity | 220 | Opacity of the active line (0-255) |
 | Inactive line opacity | 110 | Opacity of inactive lines (0-255) |
 | Auto-hide timeout | 10s | Seconds without any data from the extension before the overlay fades out |
 
-## Sync Offset
+## Hover Controls
 
-If the synced lyrics are slightly ahead or behind the audio, you can nudge them:
+Hover over the overlay to reveal a single row of controls below the lyrics:
 
-1. **Hover** over the overlay — three buttons appear below the lyrics: `[−] [0] [+]`
-2. **`[−]`** — nudge lyrics 0.5s earlier (for LRC that's delayed)
-3. **`[+]`** — nudge lyrics 0.5s later
-4. **`[0]`** — reset offset to 0
-5. A `Sync: +1.0s` toast appears for 2 seconds after each press so you see the current offset.
-6. The offset is **saved per-song** in the lyrics cache — next time you play the same song, the offset is restored automatically.
+```
+[−]  [⏮]  [▶/⏸]  [⏭]  [+]
+```
 
-## Playback Controls
+| Button | Action |
+|--------|--------|
+| `[−]` | Nudge lyrics 0.5s earlier (if they're lagging behind the audio) |
+| `[⏮]` | Previous track on YouTube |
+| `[▶/⏸]` | Play / Pause — icon toggles between play ▸ and pause ▍▍ |
+| `[⏭]` | Next track on YouTube |
+| `[+]` | Nudge lyrics 0.5s later (if they're ahead of the audio) |
 
-Hover the overlay to reveal transport buttons below the lyrics: previous, play/pause, and next. Pressing one controls the YouTube tab that is currently driving the lyrics, so you can skip or pause without switching back to the browser. The overlay only appears while a song is playing, and hides itself when playback stops.
+A `Sync: +1.0s` toast appears briefly after each nudge. The sync offset is **saved per-song** in the lyrics cache and restored automatically.
+
+## Click-to-Seek
+
+Click any visible lyric line to jump the YouTube video to that exact timestamp — skip forward or backward through the song instantly.
+
+The overlay only appears while a song is playing, and hides itself when playback stops.
 
 ## Auto-hide
 
@@ -189,17 +199,17 @@ If no source has the song, the overlay shows "No lyrics found for this song."
 - The overlay never steals focus, so your game keeps keyboard/mouse input.
 - The overlay has no title bar, no taskbar icon, and doesn't appear in Alt+Tab.
 
-### Gaming Mode (Click-Through)
+### Lock Overlay (Click-Through)
 
-When you're playing a game, the overlay can block mouse clicks in its area since it's grabbable for dragging. **Gaming mode** fixes this:
+When you're playing a game, the overlay can block mouse clicks in its area since it's grabbable for dragging. **Lock Overlay** fixes this:
 
-- Press **`Ctrl+Alt+Space`** to toggle **gaming mode**.
+- Press **`Ctrl+Alt+Space`** to toggle **Lock Overlay**.
   - The overlay becomes **click-through** — mouse clicks pass straight through to the game.
   - You can still see the lyrics, but can't interact with the overlay.
-- Press **`Ctrl+Alt+Space`** again to exit gaming mode.
+- Press **`Ctrl+Alt+Space`** again to unlock the overlay.
   - The overlay becomes draggable again.
 
-The hotkey works system-wide, even when the game has keyboard focus.
+The hotkey works system-wide, even when the game has keyboard focus. You can also toggle it via the tray icon → **Lock Overlay**.
 
 ## Repositioning the Overlay
 
@@ -243,7 +253,7 @@ The overlay is **free-draggable** — no lock, no hotkey, no toggle.
 - **pywin32** — Windows API (layered window, no-focus, window enumeration)
 - **websockets** — Async WebSocket server
 - **requests** — LRCLib + NetEase API client
-- **pynput** — Global hotkey for gaming-mode toggle
+- **pynput** — Global hotkey for Lock Overlay toggle
 - **Firefox + Chromium WebExtension** — YouTube timestamp extraction (supports all major browsers)
 
 ## Credits
