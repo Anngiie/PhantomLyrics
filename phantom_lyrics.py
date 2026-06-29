@@ -19,6 +19,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from overlay import LyricsOverlay
+from spotify_monitor import SpotifyMonitor
 from websocket_server import LyricsWebSocketServer
 from title_utils import resolve_song
 from lyrics_fetcher import search_lyrics, init_cache, save_sync_offset
@@ -94,6 +95,7 @@ class PhantomLyricsApp:
         self._overlay.transport_requested.connect(self._on_transport)
         self._overlay.seek_requested.connect(self._on_seek)
         self._ws_server: Optional[LyricsWebSocketServer] = None
+        self._spotify_monitor: Optional[SpotifyMonitor] = None
         self._tray: Optional[TrayController] = None
         self._fetch_lock = threading.Lock()
         self._current_artist: str = ""
@@ -131,8 +133,28 @@ class PhantomLyricsApp:
         )
         self._ws_server.start()
 
-        # 3. System tray icon (visibility toggle, reset position, settings, quit)
-        self._tray = TrayController(self._overlay, self._config, on_quit=self._qt_app.quit)
+        # 3. Spotify (optional — only starts if a Client ID is configured)
+        client_id = (self._config.spotify_client_id or "").strip()
+        if client_id:
+            logger.info("Spotify Client ID configured, attempting connection...")
+            self._spotify_monitor = SpotifyMonitor(
+                client_id=client_id,
+                on_track_change=self._on_song_change,
+                on_timestamp=self._on_spotify_timestamp,
+            )
+            if self._spotify_monitor.connect():
+                self._spotify_monitor.start()
+            else:
+                logger.warning("Spotify connection failed — running YouTube-only.")
+                self._spotify_monitor = None
+
+        # 4. System tray icon (visibility toggle, reset position, settings, quit)
+        self._tray = TrayController(
+            self._overlay, self._config,
+            on_quit=self._qt_app.quit,
+            on_connect_spotify=self._connect_spotify,
+            spotify_connected=bool(self._spotify_monitor),
+        )
         self._tray.setup()
 
         # 4. Handle Ctrl+C gracefully
@@ -152,6 +174,8 @@ class PhantomLyricsApp:
     def _shutdown(self) -> None:
         """Gracefully stop all background services."""
         logger.info("Shutting down...")
+        if self._spotify_monitor:
+            self._spotify_monitor.stop()
         if self._ws_server:
             self._ws_server.stop()
         logger.info("Phantom Lyrics exited cleanly.")
@@ -348,6 +372,35 @@ class PhantomLyricsApp:
     def _on_sync_offset_changed(self, artist: str, title: str, offset: float) -> None:
         """Persist a user-adjusted sync offset to the lyrics cache."""
         save_sync_offset(artist, title, offset)
+
+    # ─── Spotify ─────────────────────────────────────────────
+
+    def _on_spotify_timestamp(self, progress_seconds: float, is_playing: bool) -> None:
+        """Handle a timestamp update from Spotify (runs on the monitor thread)."""
+        self._overlay.mark_activity()
+        self._overlay.set_timestamp(progress_seconds)
+        self._overlay.set_playback_state(is_playing)
+
+    def _connect_spotify(self) -> None:
+        """Connect (or reconnect) to Spotify from the tray menu."""
+        client_id = (self._config.spotify_client_id or "").strip()
+        if not client_id:
+            logger.warning("No Spotify Client ID configured — add it in Settings.")
+            return
+        if self._spotify_monitor and self._spotify_monitor.is_connected:
+            logger.info("Spotify already connected.")
+            return
+        self._spotify_monitor = SpotifyMonitor(
+            client_id=client_id,
+            on_track_change=self._on_song_change,
+            on_timestamp=self._on_spotify_timestamp,
+        )
+        if self._spotify_monitor.connect():
+            self._spotify_monitor.start()
+            logger.info("Spotify connected and monitoring started.")
+        else:
+            logger.warning("Spotify connection failed.")
+            self._spotify_monitor = None
 
 
 # ─── Entry Point ─────────────────────────────────────────────────

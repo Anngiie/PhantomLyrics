@@ -94,11 +94,20 @@ class TrayController(QObject):
         on_quit: Callback invoked when the user selects "Quit".
     """
 
-    def __init__(self, overlay: LyricsOverlay, config: Config, on_quit) -> None:
+    def __init__(
+        self,
+        overlay: LyricsOverlay,
+        config: Config,
+        on_quit,
+        on_connect_spotify=None,
+        spotify_connected: bool = False,
+    ) -> None:
         super().__init__()
         self._overlay = overlay
         self._config = config
         self._on_quit = on_quit
+        self._on_connect_spotify = on_connect_spotify
+        self._spotify_connected = spotify_connected
         self._tray: QSystemTrayIcon | None = None
 
     def setup(self) -> bool:
@@ -129,6 +138,15 @@ class TrayController(QObject):
         self._gaming_action.setCheckable(True)
         self._gaming_action.triggered.connect(self._toggle_gaming_mode)
         menu.addAction(self._gaming_action)
+
+        # Spotify connect (only if callback provided)
+        if self._on_connect_spotify:
+            label = "Spotify ✓" if self._spotify_connected else "Connect Spotify"
+            self._spotify_action = QAction(label, menu)
+            self._spotify_action.triggered.connect(self._on_connect_spotify)
+            if self._spotify_connected:
+                self._spotify_action.setEnabled(False)
+            menu.addAction(self._spotify_action)
 
         settings_action = QAction("Settings...", menu)
         settings_action.triggered.connect(self._open_settings)

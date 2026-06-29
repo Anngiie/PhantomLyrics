@@ -50,6 +50,11 @@ class Config:
     ws_host: str = "localhost"
     ws_port: int = 8765
 
+    # ── Spotify ──
+    # Paste your Client ID from https://developer.spotify.com/dashboard
+    # Leave blank to keep Spotify disabled (YouTube-only mode).
+    spotify_client_id: str = ""
+
     def save(self) -> None:
         """Write the current config to disk."""
         try:
