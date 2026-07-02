@@ -15,16 +15,18 @@ The overlay sits on top of your game with Lock Overlay mode — you see the lyri
 
 ```
 YouTube ──► Browser Extension ──WebSocket──► Python App
-    │                                            │
-    └── Page Title ──► Title Parser ──► Lyrics Fetch (LRCLib → NetEase)
-                                                 │
-                                    PySide6 Overlay Window ◄──
+Spotify ──► Web API (OAuth) ──poll────────►   │
+                                               │
+                    Lyrics Fetch (LRCLib → NetEase)
+                                               │
+                                  PySide6 Overlay Window ◄──
 ```
 
-1. **Browser Extension** (Firefox or Chromium) sends the video timestamp and track info via WebSocket, and accepts playback commands back (works even with the YouTube tab in the background).
-2. **Track info** comes from the page's MediaSession metadata (artist, title, album) when the browser provides it, falling back to parsing the page title.
-3. **Lyrics Fetcher** queries LRCLib first, then falls back to NetEase Cloud Music for tracks LRCLib doesn't have. Results are cached to disk.
-4. **PySide6 Overlay** displays lyrics in a transparent, always-on-top, draggable window, with hover controls for sync offset and playback.
+1. **Browser Extension** (Firefox or Chromium) sends the YouTube video timestamp and track info via WebSocket, and accepts playback commands back (works even with the YouTube tab in the background).
+2. **Spotify integration** (Premium required) connects via OAuth PKCE and polls the Spotify Web API every 1.5s for the currently playing track and its exact position.
+3. **Track info** comes from MediaSession metadata or Spotify's API directly (artist, title, album), falling back to parsing the page title for YouTube.
+4. **Lyrics Fetcher** queries LRCLib first, then falls back to NetEase Cloud Music for tracks LRCLib doesn't have. Results are cached to disk.
+5. **PySide6 Overlay** displays lyrics in a transparent, always-on-top, draggable window, with hover controls for sync offset and playback.
 
 ## Project Structure
 
@@ -33,6 +35,7 @@ Phantom Lyrics/
 ├── phantom_lyrics.py      # Main app — orchestrates everything
 ├── overlay.py             # PySide6 transparent overlay window
 ├── websocket_server.py    # Local WebSocket server (receives timestamps)
+├── spotify_monitor.py     # Spotify OAuth PKCE + Web API polling (Premium)
 ├── title_utils.py         # YouTube title cleaning + artist/title splitting
 ├── lyrics_fetcher.py      # LRCLib + NetEase API client, LRC parser, disk cache
 ├── config.py              # User settings (load/save from ~/.phantom_lyrics/config.json)
@@ -256,9 +259,24 @@ The overlay is **free-draggable** — no lock, no hotkey, no toggle.
 - **pynput** — Global hotkey for Lock Overlay toggle
 - **Firefox + Chromium WebExtension** — YouTube timestamp extraction (supports all major browsers)
 
-## Upcoming Features
+## Spotify Support (Premium)
 
-- **Spotify Premium support** — native Spotify integration via the Spotify Web API, providing the same automatic, synced lyrics experience for Spotify Premium subscribers. No browser extension needed.
+Spotify Premium subscribers can get lyrics without a browser extension. The app connects directly to the Spotify Web API via OAuth.
+
+### Setup
+
+1. Go to https://developer.spotify.com/dashboard and create a new app.
+2. Click **Edit Settings** → add `http://localhost:8766/callback` to **Redirect URIs** → Save.
+3. Copy your **Client ID**.
+4. Open `~/.phantom_lyrics/config.json` and add: `"spotify_client_id": "your-client-id-here"`.
+5. Run the app — it auto-connects on startup and opens your browser for Spotify login.
+6. Play a song on any Spotify device — lyrics appear automatically.
+
+A green checkmark in the tray menu (`Spotify ✓`) confirms you're connected. The token is saved, so you only log in once.
+
+### How it works
+
+The app polls `GET /me/player/currently-playing` every 1.5 seconds. It receives the track name, artist, and exact `progress_ms` — the same data the YouTube extension provides, but directly from Spotify's servers. The lyrics pipeline is identical regardless of source.
 
 ## Credits
 
