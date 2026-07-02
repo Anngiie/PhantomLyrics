@@ -212,22 +212,23 @@ class PhantomLyricsApp:
             if action in ("claim", "hold"):
                 self._last_player_id = client_id
 
-        # Always push the playback state so the transport button icon
-        # toggles between play ▸ and pause ▍▍ immediately — even when
-        # the lock releases (pause) or a tab is ignored.
-        self._overlay.set_playback_state(is_playing)
-
         if action == "claim":
             logger.info("Locked onto tab %d", client_id)
         elif action == "hold":
             # Same active tab, still playing — keep driving lyrics.
             pass
         elif action == "release":
-            # Active tab paused — release lock but keep lyrics visible.
+            # Active tab paused — push state so icon flips to play ▸,
+            # then release lock but keep lyrics visible.
+            self._overlay.set_playback_state(is_playing)
             return
         elif action == "ignore":
             # Another tab holds the lock, or nothing is playing yet.
+            # Don't push playback state — only the locked tab controls the icon.
             return
+
+        # Only the locked, playing tab updates the icon and timestamp.
+        self._overlay.set_playback_state(is_playing)
 
         # Active, playing tab: detect the song and push the timestamp.
         artist, title = resolve_song(
